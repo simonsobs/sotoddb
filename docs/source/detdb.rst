@@ -79,25 +79,65 @@ Using a DetDB
 -------------
 
 Assuming that you already have a populated DetDB, the following
-examples show how to extract information from it.
+examples show how to extract information from it.  To get an example
+database to work, use the ``toddb.get_example`` function::
+
+  >>> import sotoddb
+  >>> my_db = sotoddb.get_example('DetDB')
 
 To get a list of all detectors managed by the database, use the
-get_dets() method.  Normally this function would be used to restrict
-the returned dataset somehow, but without arguments it will list all
-detectors::
+``get_dets()`` method.  Normally this function would be used to
+restrict the returned dataset somehow, but without arguments it will
+list all detectors::
 
   >>> det_list = my_db.get_dets()
-  >>> print det_list[0]['name']
-  >>> print det_list[0]['name']
-  
+  >>> det_list[0]
+  (1, 'LF1_00000', 1)
+  >>> det_list.keys
+  ['id', 'name', 'valid']
+  >>> det_list.asarray()['name'][0:10]
+  array(['LF1_00000', 'LF1_00001', 'LF1_00002', 'LF1_00003', 'LF1_00004',
+         'LF1_00005', 'LF1_00006', 'LF1_00007', 'LF1_00008', 'LF1_00009'],
+        dtype='<U9')
+
+To look up certain properties of certain detectors, use
+``get_props()``.  We will use the detector list returned before, and
+see what camera and array is associated with these detectors::
+
+  >>> props = my_db.get_props(det_list, props=['camera', 'array_code'])
+  >>> print(len(props))
+  17094
+  >>> print(set.distinct())
+  [('latr', 'HF1'), ('latr', 'LF1'), ('latr', 'MF1')]
+
+The two printed lines indicate that there are 17094 results returned
+(one (camera, array_code) pair per detector), but that there only 3
+different values for these tuples -- they all have camera "latr" but
+have different values for array_code.
+
+The ``det_list`` and ``props`` returned by get_dets and get_props are
+actually instances of an sotoddb class called ``ResultSet``.
+``ResultSet`` is aware of the column names, and has a few convenience
+methods defined for converting the data to more useful structures.
+One such structure is the numpy structured array:
+
+  >>> xy = my_db.get_props(det_list, pros=['geometry.wafer_x', 'geometry.wafer_y'])
+  >>> xyar = xy.asarray(simplify_keys=True)
+  >>> print(xyar.dtype)
+  [('wafer_x', '<f8'), ('wafer_y', '<f8')]
+  >>> radii = (xyar['wafer_x']**2 + xyar['wafer_y']**2)**0.5
+  >>> print(max(radii))
+  3.6486709909225854
 
 
-
-Class documentation
--------------------
+Class auto-documentation
+------------------------
 
 What follows is automatically generated from the docstrings.
 
 .. autoclass:: sotoddb.DetDB
    :members:
 
+
+.. autoclass:: sotoddb.ResultSet
+   :members:

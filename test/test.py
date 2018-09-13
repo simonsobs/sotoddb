@@ -3,14 +3,6 @@ import sotoddb
 print('Creating the database')
 db = sotoddb.get_example('DetDB')
 
-print('Saving to disk...')
-db.copy('test_out.sqlite', clobber=True)
-
-print('Loading from disk...')
-db = sotoddb.DetDB('test_out.sqlite')
-print('Detector count: %i' % len(db.get_dets()))
-print()
-
 print('Test 1: how many dets have array_code=HF1?')
 X = db.get_dets(props={'base.array_code': 'HF1'})
 print('  Answer: %i' % len(X))
@@ -27,9 +19,19 @@ for p in pairs:
     print('    ' + str(p))
 print()
 
-print('Test 3: Make a copy of just the LF dets.')
+print('Test 3: Make a copy of just the LF1 dets.')
 db2 = db.copy()
 X = db2.get_dets(props={'array_code': 'LF1'})
 db2.reduce(X, time0=-1, time1=1)
-#print len(db), len(db2)
-db3 = db2.copy('test3.sqlite', clobber=True)
+db3 = db2.copy(map_file='test_LF1.sqlite', clobber=True)
+print()
+
+
+print('Loading from disk...')
+db1 = sotoddb.DetDB.from_file('test_out.sqlite')
+print('Detector count: %i' % len(db1.get_dets()))
+print()
+
+#print('Test docs...')
+#print(help(db1.create_table))
+    

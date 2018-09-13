@@ -1,5 +1,6 @@
 from . import detdb
 from .detdb import DetDB
+from .detdb import ResultSet
 
 
 def get_example(db_type, *args, **kwargs):
