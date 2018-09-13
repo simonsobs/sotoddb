@@ -105,9 +105,9 @@ To look up certain properties of certain detectors, use
 see what camera and array is associated with these detectors::
 
   >>> props = my_db.get_props(det_list, props=['camera', 'array_code'])
-  >>> print(len(props))
+  >>> len(props)
   17094
-  >>> print(set.distinct())
+  >>> props.distinct()
   [('latr', 'HF1'), ('latr', 'LF1'), ('latr', 'MF1')]
 
 The two printed lines indicate that there are 17094 results returned
