@@ -11,6 +11,7 @@ Welcome to sotoddb's documentation!
    :caption: Contents:
 
    detdb
+   proddb
 
 
 Indices and tables
