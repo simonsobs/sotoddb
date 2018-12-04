@@ -196,15 +196,13 @@ class ManifestDB:
         db0 = cls(map_file=filename)
         return db0
 
-    def __init__(self, *args, map_file=None, scheme=None):
+    def __init__(self, map_file=None, scheme=None):
         """
         Instantiate a database.  If map_file is provided, the
         database will be connected to the indicated sqlite file on
         disk, and any changes made to this object be written back to
         the file.
         """
-        assert(len(args)) == 0  # If you want map_file, specify by name.
-
         if map_file == None:
             map_file = ':memory:'
         if os.path.exists(map_file):

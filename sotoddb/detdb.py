@@ -68,15 +68,13 @@ class DetDB:
         db0 = cls(map_file=filename)
         return db0.copy(map_file=None)
         
-    def __init__(self, *args, map_file=None, init_db=True):
+    def __init__(self, map_file=None, init_db=True):
         """
         Instantiate a detector database.  If map_file is provided, the
         database will be connected to the indicated sqlite file on
         disk, and any changes made to this object be written back to
         the file.
         """
-        assert(len(args)) == 0  # If you want map_file, specify by name.
-
         if map_file == None:
             map_file = ':memory:'
         self.conn = sqlite3.connect(map_file)
@@ -156,7 +154,7 @@ class DetDB:
         c = self.conn.cursor()
         c.execute('drop table %s' % name)
 
-    def copy(self, *args, map_file=None, clobber=False):
+    def copy(self, map_file=None, clobber=False):
         """
         Duplicate the current database into a new database object, and
         return it.  If map_file is specified, the new database will be
@@ -164,7 +162,6 @@ class DetDB:
         of writing a DB to disk to call copy(map_file=...) and then
         simply discard the returned object.
         """
-        assert(len(args) == 0) # User must use map_file=... keyword for filename.
         if map_file is not None and os.path.exists(map_file):
             if clobber:
                 os.remove(map_file)
