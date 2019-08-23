@@ -53,6 +53,18 @@ class ObsFileDB:
     #: from this database.
     prefix = ''
 
+    def __init__(self, map_file, readonly=False):
+        """Instantiate a database.  Users should normally get a database
+        through one of the classmethods, "new" or "from_file".
+
+        """
+        if readonly:
+            map_file, uri = 'file:%s?mode=ro' % map_file, True
+        else:
+            uri = False
+        self.conn = sqlite3.connect(map_file, uri=uri)
+        self.conn.row_factory = sqlite3.Row  # access columns by name
+
     @classmethod
     def from_file(cls, filename, must_exist=False, readonly=False):
         """
@@ -93,18 +105,6 @@ class ObsFileDB:
             self = cls(filename)
         self._create()
         return self
-
-    def __init__(self, map_file, readonly=False):
-        """Instantiate a database.  Users should normally get a database
-        through one of the classmethods, "new" or "from_file".
-
-        """
-        if readonly:
-            map_file, uri = 'file:%s?mode=ro' % map_file, True
-        else:
-            uri = False
-        self.conn = sqlite3.connect(map_file, uri=uri)
-        self.conn.row_factory = sqlite3.Row  # access columns by name
 
     def copy(self, map_file=None, clobber=False):
         """

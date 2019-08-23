@@ -87,3 +87,4 @@ Class Documentation
 .. autoclass:: sotoddb.ObsFileDB
    :members:
 
+   .. automethod:: __init__
