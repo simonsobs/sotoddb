@@ -1,6 +1,7 @@
 from . import detdb
 from .detdb import DetDB
 from .detdb import ResultSet
+from .obsfiledb import ObsFileDB
 
 
 def get_example(db_type, *args, **kwargs):

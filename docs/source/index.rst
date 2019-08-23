@@ -12,6 +12,7 @@ Welcome to sotoddb's documentation!
 
    detdb
    proddb
+   obsfiledb
 
 
 Indices and tables
