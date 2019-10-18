@@ -1,5 +1,6 @@
-Detector Information Database (detdb)
-=====================================
+====================================
+DetDB: Detector Information Database
+====================================
 
 The purpose of the ``DetDB`` class is to give analysts access to
 quasi-static detector metadata.  Some good example of quasi-static
@@ -13,10 +14,216 @@ data.
 Certain properties may change with time, for example if wiring or
 optics tube arrangements are adjusted from one season of observations
 to the next.  The ``DetDB`` is intended to support values that change
-with time.
+with time.  **The timestamp support is still under development.**
+
+
+.. contents:: Jump to:
+   :local:
+
+
+Using a DetDB (Tutorial)
+========================
+
+Loading a database into memory
+------------------------------
+
+To load an existing :py:obj:`DetDB<sotoddb.DetDB>` into memory, use
+the :py:obj:`DetDB.from_file<sotoddb.DetDB.from_file>` class method::
+
+  >>> import sotoddb
+  >>> my_db = sotoddb.DetDB.from_file('path/to/database.sqlite')
+
+.. _DetDB : :py:obj:`blech<sotoddb.DetDB.from_file>`
+
+This function understands a few different formats; see the method
+documentation.
+
+If you want an example database to play with, run this::
+
+  >>> import sotoddb
+  >>> my_db = sotoddb.get_example('DetDB')
+  Creating table base
+  Creating table geometry
+  Creating LF-type arrays...
+  Creating MF-type arrays...
+  Creating HF-type arrays...
+  Committing 17094 detectors...
+  Checking the work...
+  >>> my_db
+  <sotoddb.detdb.DetDB object at 0x7f691ccb4080>
+
+The usage examples below are based on this example database.
+
+
+Detectors and Properties
+------------------------
+
+The typical use of DetDB involves alternating use of the ``dets`` and
+``props`` functions.  The ``dets`` function returns a list of
+detectors with certain indicated properties; the ``props`` function
+returns the properties of certain indicated detectors.
+
+We can start by getting a list of *all* detectors in the database::
+
+  >>> det_list = my_db.dets()
+  >>> det_list
+  ResultSet<[name], 17094 rows>
+
+The :py:obj:`ResultSet<sotoddb.ResultSet>` is a simple container for
+tabular data.  Follow the link to the class documentation for the
+detailed interface.  Here we have a single column, giving the detector
+name::
+
+  >>> det_list['name']
+  array(['LF1_00000', 'LF1_00001', 'LF1_00002', ..., 'HF2_06501',
+         'HF2_06502', 'HF2_06503'], dtype='<U9')
+
+Similarly, we can retrieve all of the properties for all of the
+detectors in the database::
+
+  >>> props = my_db.props()
+  >>> props
+  ResultSet<[base.instrument,base.camera,base.array_code,
+  base.array_class,base.wafer_code,base.freq_code,base.det_type,
+  geometry.wafer_x,geometry.wafer_y,geometry.wafer_pol], 17094 rows>
+
+The output of ``props()`` is also a ``ResultSet``; but it has many
+columns.  The property values for the first detector are:
+
+  >>> props[0]
+  {'base.instrument': 'simonsobs', 'base.camera': 'latr',
+   'base.array_code': 'LF1', 'base.array_class': 'LF',
+   'base.wafer_code': 'W1', 'base.freq_code': 'f027',
+   'base.det_type': 'bolo', 'geometry.wafer_x': 0.0,
+   'geometry.wafer_y': 0.0, 'geometry.wafer_pol': 0.0}
+
+We can also inspect the data by column, e.g. ``props['base.camera']``.
+Note that `name` isn't a column here... each row corresponds to a
+single detector, in the order returned by my_db.dets().
+
+
+Querying detectors based on properties
+--------------------------------------
+
+Suppose we want to get the names of the detectors in the (nominal) 93
+GHz band.  These are signified, in this example, by having the value
+``'f093'`` for the ``base.freq_code`` property.  We call ``dets()``
+with this specfied::
+
+  >>> f093_dets = my_db.dets(props={'base.freq_code': 'f093'})
+  >>> f093_dets
+  ResultSet<[name], 5184 rows>
+
+The argument passed to the ``props=`` keyword, here, is a dictionary
+containing certain values that must be matched in order for a detector
+to be included in the output ResultSet.  One can also pass a *list* of
+such dictionaries (in which case a detector is included if it fully
+matches any of the dicts in the list).  One can, to similar effect,
+pass a ResultSet, which results in detectors being checked against
+each row of the ResultSet.
+
+Similarly, we can request the properties of some sub-set of the
+detectors; let's use the ``f093_dets`` list to confirm that these
+detectors are all in ``MF`` arrays::
+
+  >>> f093_props = my_db.props(f093_dets, props=['base.array_class'])
+  >>> list(f093_props.distinct())
+  [{'base.array_class': 'MF'}]
+
+Note we've used the
+:py:obj:`ResultSet.distinct()<sotoddb.ResultSet.distinct>` method to
+eliminate duplicate entries in the output from ``props()``.  If you
+prefer to work with unkeyed data, you can work with ``.rows`` instead
+of converting to a list::
+
+  >>> f093_props.distinct().rows
+  [('MF',)]
+
+
+Grouping detectors by property
+------------------------------
+
+Suppose we want to loop over all detectors, but with them grouped by
+array name and frequency band.  There are many ways to do this, but a
+very general approach is to generate a list of tuples representing the
+distinct combinations of these properties.  We then loop over that
+list, pulling out the names of the matching detectors for each tuple
+of property values.
+
+Here's an example, which simply counts the results::
+
+  # Get the two properties, one row per detector.
+  >>> props = my_db.props(props=[
+  ...   'base.array_code', 'base.freq_code'])
+  # Reduce to the distinct combinations (only 14 rows remain).
+  >>> combos = props.distinct()
+  # Loop over all 14 combos:
+  >>> for combo in combos:
+  ...   these_dets = my_db.dets(props=combo)
+  ...   print('Combo {} includes {} dets.'.format(combo, len(these_dets)))
+  ...
+  Combo {'base.array_code': 'HF1', 'base.freq_code': 'f225'} includes 1626 dets.
+  Combo {'base.array_code': 'HF1', 'base.freq_code': 'f278'} includes 1626 dets.
+  Combo {'base.array_code': 'HF2', 'base.freq_code': 'f225'} includes 1626 dets.
+  # ...
+  Combo {'base.array_code': 'MF4', 'base.freq_code': 'f145'} includes 1296 dets.
+
+
+Extracting useful detector properties
+-------------------------------------
+
+There are a couple of standard recipes for getting data out
+efficiently.  SUppose you want to extract two verbosely-named
+numerical columns `geometry.wafer_x` and `geometry.wafer_y`.  We want
+to be sure to only type those key names out once::
+
+  # Find all 'LF' detectors.
+  >>> LF_dets = my_db.dets(props={'base.array_class': 'LF'})
+  >>> LF_dets
+  ResultSet<[name], 222 rows>
+  # Get positions for those detectors.
+  >>> positions = my_db.props(LF_dets, props=['geometry.wafer_x',
+  ... 'geometry.wafer_y'])
+  >>> x, y = numpy.transpose(positions.rows)
+  >>> y
+  array([0.  , 0.02, 0.04, 0.06, 0.08, 0.1 , 0.12, 0.14, 0.16, 0.18, 0.2 ,
+         0.22, 0.24, 0.26, 0.28, 0.3 , 0.32, 0.34, 0.36, 0.38, ...])
+  # Now go plot stuff using x and y...
+  # ...
+
+  
+Note in the last line we've used numpy to transform the tabular data
+(in `ResultSet.rows`) into a simple (n,2) float array, which is then
+transposed to a (2,n) array, and broadcast to variables x and y.  It
+is import to include the `.rows` there -- a direct array conversion on
+`positions` will not give you what you want.
+
+Inspecting a database
+---------------------
+
+If you want to see a list of the properties defined in the database,
+just call ``props`` with an empty list of detectors.  Then access the
+``keys`` data member, if you want programmatic access to the list of
+properties::
+
+  >>> props = my_db.props([])
+  >>> props
+  ResultSet<[base.instrument,base.camera,base.array_code,
+  base.array_class,base.wafer_code,base.freq_code,base.det_type,
+  geometry.wafer_x,geometry.wafer_y,geometry.wafer_pol], 0 rows>
+  >>> props.keys
+  ['base.instrument', 'base.camera', 'base.array_code',
+  'base.array_class', 'base.wafer_code', 'base.freq_code',
+  'base.det_type', 'geometry.wafer_x', 'geometry.wafer_y',
+  'geometry.wafer_pol']
+
+
+Creating a DetDB [empty]
+========================
+
 
 Database organization
----------------------
+=====================
 
 **The dets Table**
 
@@ -75,69 +282,21 @@ satisfied.  Functions exist, however, to verify compliance of property
 tables.
 
 
-Using a DetDB
--------------
-
-Assuming that you already have a populated DetDB, the following
-examples show how to extract information from it.  To get an example
-database to work, use the ``toddb.get_example`` function::
-
-  >>> import sotoddb
-  >>> my_db = sotoddb.get_example('DetDB')
-
-To get a list of all detectors managed by the database, use the
-``get_dets()`` method.  Normally this function would be used to
-restrict the returned dataset somehow, but without arguments it will
-list all detectors::
-
-  >>> det_list = my_db.get_dets()
-  >>> det_list[0]
-  (1, 'LF1_00000', 1)
-  >>> det_list.keys
-  ['id', 'name', 'valid']
-  >>> det_list.asarray()['name'][0:10]
-  array(['LF1_00000', 'LF1_00001', 'LF1_00002', 'LF1_00003', 'LF1_00004',
-         'LF1_00005', 'LF1_00006', 'LF1_00007', 'LF1_00008', 'LF1_00009'],
-        dtype='<U9')
-
-To look up certain properties of certain detectors, use
-``get_props()``.  We will use the detector list returned before, and
-see what camera and array is associated with these detectors::
-
-  >>> props = my_db.get_props(det_list, props=['camera', 'array_code'])
-  >>> len(props)
-  17094
-  >>> props.distinct()
-  [('latr', 'HF1'), ('latr', 'LF1'), ('latr', 'MF1')]
-
-The two printed lines indicate that there are 17094 results returned
-(one (camera, array_code) pair per detector), but that there only 3
-different values for these tuples -- they all have camera "latr" but
-have different values for array_code.
-
-The ``det_list`` and ``props`` returned by get_dets and get_props are
-actually instances of an sotoddb class called ``ResultSet``.
-``ResultSet`` is aware of the column names, and has a few convenience
-methods defined for converting the data to more useful structures.
-One such structure is the numpy structured array:
-
-  >>> xy = my_db.get_props(det_list, pros=['geometry.wafer_x', 'geometry.wafer_y'])
-  >>> xyar = xy.asarray(simplify_keys=True)
-  >>> print(xyar.dtype)
-  [('wafer_x', '<f8'), ('wafer_y', '<f8')]
-  >>> radii = (xyar['wafer_x']**2 + xyar['wafer_y']**2)**0.5
-  >>> print(max(radii))
-  3.6486709909225854
-
-
 Class auto-documentation
-------------------------
+========================
 
-What follows is automatically generated from the docstrings.
+DetDB
+-----
+
+Auto-generated documentation should appear here.
 
 .. autoclass:: sotoddb.DetDB
    :members:
 
+ResultSet
+---------
+
+Auto-generated documentation should appear here.
 
 .. autoclass:: sotoddb.ResultSet
    :members:
