@@ -1,6 +1,7 @@
 import sqlite3
 import os
 from collections import OrderedDict
+import numpy as np
 
 TABLE_DEFS = {
     'detsets': [
@@ -10,7 +11,7 @@ TABLE_DEFS = {
     'files': [
         "`name`    varchar(256) unique",
         "`detset`  varchar(16)",
-        "`obs_id`  int",
+        "`obs_id`  varchar(256)",
         "`sample_start` int",
         "`sample_stop`  int",
     ],
@@ -42,7 +43,8 @@ class ObsFileDB:
 
     Note that many functions have a "commit" option, which simply
     affects whether the .commit is called on the database or not (it
-    can be faster to suppress such commit ops when
+    can be faster to suppress commit ops when a running a batch of
+    updates, and commit manually at the end).
 
     """
 
@@ -66,7 +68,8 @@ class ObsFileDB:
         self.conn.row_factory = sqlite3.Row  # access columns by name
 
     @classmethod
-    def from_file(cls, filename, must_exist=False, readonly=False):
+    def from_file(cls, filename, must_exist=False, readonly=False,
+                  prefix=None):
         """
         Returns an ObsFileDB mapped onto the specified sqlite file.
         """
@@ -79,6 +82,9 @@ class ObsFileDB:
         self = cls(filename, readonly)
         if do_create:
             self._create()
+        if prefix is None:
+            prefix = os.path.split(filename)[0]
+        self.prefix = prefix
         return self
 
     @classmethod
@@ -106,7 +112,7 @@ class ObsFileDB:
         self._create()
         return self
 
-    def copy(self, map_file=None, clobber=False):
+    def copy(self, map_file=None, overwrite=False):
         """
         Duplicate the current database into a new database object, and
         return it.  If map_file is specified, the new database will be
@@ -116,8 +122,14 @@ class ObsFileDB:
         if map_file is None:
             map_file = ':memory:'
         script = ' '.join(self.conn.iterdump())
+        if map_file != ':memory:' and os.path.exists(map_file):
+            if not overwrite:
+                raise RuntimeError("Output database '%s' exists -- remove or "
+                                   "pass overwrite=True to copy." % map_file)
+            os.remove(map_file)
         new_db = ObsFileDB(map_file)
         new_db.conn.executescript(script)
+        new_db.prefix = self.prefix
         return new_db
 
     def _create(self):
@@ -187,7 +199,8 @@ class ObsFileDB:
         specified by obs_id.
 
         """
-        c = self.conn.execute('select detset from files where obs_id=?', (obs_id,))
+        c = self.conn.execute('select distinct detset from files '
+                              'where obs_id=?', (obs_id,))
         return [r[0] for r in c]
 
     def get_dets(self, detset):
@@ -221,4 +234,133 @@ class ObsFileDB:
         output = OrderedDict()
         for r in c:
             output[r[0]] = (self.prefix + r[1], r[2], r[3])
+        return output
+
+    def verify(self):
+        # Check for the presence of each listed file.
+        c = self.conn.execute('select name, obs_id, detset, sample_start '
+                              'from files')
+        rows = []
+        for r in c:
+            fp = self.prefix + r[0]
+            rows.append((os.path.exists(fp), fp) + tuple(r))
+
+        obs = OrderedDict()
+        for r in rows:
+            present, fullpath, name, obs_id, detset, sample_start = r
+            if obs_id not in obs:
+                obs[obs_id] = {'present': [],
+                               'absent': []}
+            if present:
+                obs[obs_id]['present'].append((detset, sample_start))
+            else:
+                obs[obs_id]['absent'].append((detset, sample_start))
+
+        # Make a detset, sample_start grid for each observation.
+        grids = OrderedDict()
+        for k, v in obs.items():
+            items = v['present']
+            detsets = list(set([a for a, b in items]))
+            sample_starts = list(set([b for a, b in items]))
+            grid = np.zeros((len(detsets), len(sample_starts)), bool)
+            for a, b in items:
+                grid[detsets.index(a), sample_starts.index(b)] = True
+            grids[k] = {'detset': detsets,
+                        'sample_start': sample_starts,
+                        'grid': grid}
+
+        return {'raw': rows,
+                'obs_id': obs,
+                'grids': grids}
+
+    def drop_obs(self, obs_id):
+        """Delete the specified obs_id from the database.  Returns a list of
+        files that are no longer covered by the databse (with prefix).
+
+        """
+        # What files does this affect?
+        c = self.conn.execute('select name from files where obs_id=?',
+                              (obs_id,))
+        affected_files = [self.prefix + r[0] for r in c]
+        # Drop them.
+        self.conn.execute('delete from frame_offsets where file_name in '
+                          '(select name from files where obs_id=?)',
+                          (obs_id,))
+        self.conn.execute('delete from files where obs_id=?',
+                          (obs_id,))
+        self.conn.commit()
+        return affected_files
+
+    def drop_detset(self, detset):
+        """Delete the specified detset from the database.  Returns a list of
+        files that are no longer covered by the database (with
+        prefix).
+
+        """
+        # What files does this affect?
+        c = self.conn.execute('select name from files where detset=?',
+                              (detset,))
+        affected_files = [self.prefix + r[0] for r in c]
+        # Drop them.
+        self.conn.execute('delete from frame_offsets where file_name in '
+                          '(select name from files where detset=?)',
+                          (detset,))
+        self.conn.execute('delete from files where detset=?',
+                          (detset,))
+        self.conn.commit()
+        return affected_files
+
+    def drop_incomplete(self):
+        """Compare the files actually present on the system to the ones listed
+        in this database.  Drop detsets from each observation, as
+        necessary, such that the database is consistent with the file
+        system.
+
+        Returns a list of files that are on the system but are no
+        longer included in the database.
+
+        """
+        affected_files = []
+        scan = self.verify()
+        for obs_id, info in scan['grids'].items():
+            # Drop any detset that does not have complete sample
+            # coverage.
+            detset_to_drop = np.any(~info['grid'], axis=1)
+            for i in detset_to_drop.nonzero()[0]:
+                affected_files.extend(
+                    [r[0] for r in self.conn.execute(
+                        'select name from files where obs_id=? and detset=?',
+                        (obs_id, info['detset'][i]))])
+                self.conn.execute(
+                    'delete from files where obs_id=? and detset=?',
+                    (obs_id, info['detset'][i]))
+        # Drop any detset that no longer appear in any files.
+        self.conn.execute('delete from detsets where name not in '
+                            '(select distinct detset from files)')
+        self.conn.commit()
+        self.conn.execute('vacuum')
+
+        # Return the full paths of only the existing files that have
+        # been dropped from the DB.
+        path_map = {r[2]: r[1] for r in scan['raw'] if r[0]}
+        return [r[1] for r in scan['raw'] if r[2] in affected_files]
+
+    def get_file_list(self, fout=None):
+        """Returns a list of all files in the database, without the file
+        prefix, sorted by observation / detset / sample_start.  This
+        is the sort of list one might use with rsync --files-from.
+
+        If you pass an open file or filename to fout, the names will
+        be written there, too.
+
+        """
+        c = self.conn.execute('select name from files order by '
+                              'obs_id, detset, sample_start')
+        output = [r[0] for r in c]
+        if fout is not None:
+            if isinstance(fout, str):
+                assert(not os.path.exists(fout))
+                fout = open(fout, 'w')
+            for line in output:
+                fout.write(line+'\n')
         return output
