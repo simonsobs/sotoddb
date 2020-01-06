@@ -55,62 +55,72 @@ class ObsFileDB:
     #: from this database.
     prefix = ''
 
-    def __init__(self, map_file, readonly=False):
-        """Instantiate a database.  Users should normally get a database
-        through one of the classmethods, "new" or "from_file".
+    def __init__(self, map_file=None, prefix=None, init_db=True, readonly=False):
+        """Instantiate an ObsFileDB.
+
+        Arguments:
+          map_file (string): sqlite database file to map.  Defaults to
+            ':memory:'.
+          prefix (string): as described in class documentation.
+          init_db (bool): If True, attempt to create the database
+            tables.
+          readonly (bool): If True, the database file will be mapped
+            in read-only mode.  Not valid on dbs held in :memory:.
 
         """
+        if map_file is None:
+            map_file = ':memory:'
+
+        self.prefix = self._get_prefix(map_file, prefix)
+
+        uri = False
         if readonly:
+            if map_file == ':memory:':
+                raise ValueError('Cannot honor request for readonly db '
+                                 'mapped to :memory:.')
             map_file, uri = 'file:%s?mode=ro' % map_file, True
-        else:
-            uri = False
+
         self.conn = sqlite3.connect(map_file, uri=uri)
         self.conn.row_factory = sqlite3.Row  # access columns by name
 
-    @classmethod
-    def from_file(cls, filename, must_exist=False, readonly=False,
-                  prefix=None):
-        """
-        Returns an ObsFileDB mapped onto the specified sqlite file.
-        """
-        do_create = False
-        if not os.path.exists(filename):
-            if must_exist:
-                raise RuntimeError('Insisted that ObsFileDB at {} must exist, '
-                                   'but it does not.'.format(filename))
-            do_create = True
-        self = cls(filename, readonly)
-        if do_create:
+        if init_db and not readonly:
             self._create()
-        if prefix is None:
-            prefix = os.path.split(filename)[0]
-        self.prefix = prefix
-        return self
+
+    @staticmethod
+    def _get_prefix(map_file, prefix):
+        """Common logic for setting the file prefix based on map_file and
+        prefix arguments.
+
+        """
+        if prefix is not None:
+            return prefix
+        if map_file == ':memory:':
+            return ''
+        return os.path.split(os.path.abspath(map_file))[0] + '/'
+
+    @classmethod
+    def from_file(cls, map_file, prefix=None):
+        """Returns an ObsFileDB that is initialized from map_file.  This is a
+        copy of the database; changes will not be written back to the
+        file.
+
+        Arguments:
+          map_file (str): Name of the file on disk.  If instead the
+            string is the name of an existing directory, the code will
+            try to find obsfildb.sqlite in that directory.
+          prefix (str): Prefix for the database (see object docs).
+
+        """
+        if os.path.isdir(map_file):
+            map_file = os.path.join(map_file, 'obsfiledb.sqlite')
+        source_db = cls(map_file, prefix=prefix, readonly=True)
+        return source_db.copy()
 
     @classmethod
     def for_dir(cls, path, filename='obsfiledb.sqlite', readonly=True):
-        """Returns an ObsFileDB located at the specified directory.  The DB is
-        assumed to describe the data files based in that directory.
-
-        """
-        db_file = os.path.join(path, filename)
-        self = cls(db_file, readonly)
-        self.prefix = path
-        return self
-
-    @classmethod
-    def new(cls, filename=':memory:'):
-        """Returns a new ObsFileDB.  It will be mapped to RAM unless a
-        database file is specified, in which case that file should not exist.
-
-        """
-        if filename is None:
-            self = cls(':memory:')
-        else:
-            assert(not os.path.exists(filename))
-            self = cls(filename)
-        self._create()
-        return self
+        """Deprecated; use from_file()."""
+        print('Use of ObsFileDb.for_dir() is deprecated... use from_file.')
+        return self.from_file(os.path.join(path, filename), prefix=path)
 
     def copy(self, map_file=None, overwrite=False):
         """
@@ -127,14 +137,14 @@ class ObsFileDB:
                 raise RuntimeError("Output database '%s' exists -- remove or "
                                    "pass overwrite=True to copy." % map_file)
             os.remove(map_file)
-        new_db = ObsFileDB(map_file)
+        new_db = ObsFileDB(map_file, init_db=False)
         new_db.conn.executescript(script)
         new_db.prefix = self.prefix
         return new_db
 
     def _create(self):
         """
-        Create the database tables.
+        Create the database tables if they do not already exist.
         """
         # Create the tables:
         table_defs = TABLE_DEFS.items()
@@ -221,7 +231,7 @@ class ObsFileDB:
 
         """
         if prefix is None:
-            self.prefix
+            prefix = self.prefix
 
         if detsets is None:
             detsets = self.get_detsets(obs_id)
@@ -233,10 +243,21 @@ class ObsFileDB:
                               (obs_id,) + tuple(detsets))
         output = OrderedDict()
         for r in c:
-            output[r[0]] = (self.prefix + r[1], r[2], r[3])
+            if not r[0] in output:
+                output[r[0]] = []
+            output[r[0]].append((prefix + r[1], r[2], r[3]))
         return output
 
     def verify(self):
+        """Check the filesystem for the presence of files described in the
+        database.  Returns a dictionary containing this information in
+        various forms; see code for details.
+
+        This function is used internally by the drop_incomplete()
+        function, and may also be useful for debugging file-finding
+        problems.
+
+        """
         # Check for the presence of each listed file.
         c = self.conn.execute('select name, obs_id, detset, sample_start '
                               'from files')

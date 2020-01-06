@@ -5,6 +5,49 @@ The purpose of ObsFileDB is to provide a map into a large set of TOD
 files, giving the names of the files and a compressed expression of
 what time indices and detectors are present in each file.
 
+Location of Files
+-----------------
+
+The ObsFileDB is represented on disk by an sqlite database file.  The
+sqlite database contains information about data files, and the
+*partial paths* of the data files.  By *partial paths*, we mean that
+only the part of the filenames relative to some root node of the data
+set should be stored in the database.  In order for the code to find
+the data files easily, it is most natural to place the
+obsfiledb.sqlite file in that same root node of the data set.
+Consider the following file listing as an example::
+
+  /
+   data/
+        planet_obs/
+                   obsfiledb.sqlite     # the database
+                   observation0/        # directory for an obs
+                                data0_0 # one data file
+                                data0_1
+                   observation1/
+                                data1_0
+                                data1_1
+                   observation2/
+                   ...
+
+On this particular file system, our "root node of the data set" is
+located at ``/data/planet_obs``.  All data files are located in
+subdirectories of that one root node directory.  The ObsFileDB
+database file is also located in that directory, and called
+``obsfiledb.sqlite``.  The filenames in obsfiledb.sqlite are written
+relative to that root node directory; for example
+``observation0/data0_1``.  This means that we can copy or move the
+contents of the ``planet_obs`` directory to some other path and the
+ObsFileDB will not need to be updated.
+
+There are functions in ObsFileDB that return the full path to the
+files, rather than the partial path.  This is achieved by combining
+the partial file names in the database with the ObsFileDB instance's
+"prefix".  By default, "prefix" is set equal to the directory where
+the source sqlite datafile is located.  But it can be overridden, if
+needed, when the ObsFileDB is instantiated (or afterwards).
+
+
 Data Model
 ----------
 
@@ -21,6 +64,28 @@ We assume the following organization of the data:
   cleanly onto files, thus each file in the Observation should contain
   the data for exactly one detset.
 
+Here's some ascii art showing an example of how the data in an
+observation must be split between files::
+
+     sample index
+   X-------------------------------------------------->
+ d |
+ e |   +-------------------------+------------------+
+ t |   | obs0_waf0_00000         | obs0_waf0_01000  |
+ e |   +-------------------------+------------------+
+ c |   | obs0_waf1_00000         | obs0_waf1_01000  |
+ t |   +-------------------------+------------------+
+ o |   | obs0_waf2_00000         | obs0_waf2_01000  |
+ r |   +-------------------------+------------------+
+   V
+
+
+In this example the data for the observation has been distributed into
+6 files.  There are three detsets, probably called ``waf0``, ``waf1``,
+and ``waf2``.  In the sample index (or time) direction, each detset is
+associated with two files; apparently the observation has been split
+at sample index 1000.
+
 Notes:
 
 - Normally detsets will be coherent across a large set of observations
@@ -29,9 +94,12 @@ Notes:
 - In the case of non-cosampled arrays that are observing at the same
   time on the same telescope: these qualify as different observations
   and should be given different obs_ids.
-- Some work will be easier if all of the files in the data set are
-  divided along the same lines in time.  But this is not strictly
-  required, at present, by the database structure.
+- It is currently assumed that in a single observation the files for
+  each detset will be divided at the same sample index.  The database
+  structure doesn't have this baked in, but some internal verification
+  code assumes this behavior.  So this requirement can likely be
+  loosened, if need be.
+
 
 The database consists of two main tables.  The first is called
 ``detsets`` and associates detectors (string ``detsets.det``) with a
@@ -54,15 +122,18 @@ ObsFileDB is accomplished through the functions ``get_dets``,
 Example Usage
 -------------
 
-Suppose we have a coherent archive of TOD data files living at path
-MY_TOD_FILES/.  Suppose someone was generated the database file
-MY_TOD_FILES/obsfiledb.sqlite.  Then to find things in the data set we
-instantiate access to the database (this will open the DB as read-only
-by default)::
+Suppose we have a coherent archive of TOD data files living at
+``/mnt/so1/shared/todsims/pipe-s0001/v2/``.  And suppose there's a
+database file, ``obsfiledb.sqlite``, in that directory.  We can load
+the observation database like this::
 
-  db = ObsFileDB.for_dir('MY_TOD_FILES')
+  import sotoddb
+  db = sotoddb.ObsFileDB.from_file('/mnt/so1/shared/todsims/pip-s0001/v2/')
 
-And then find an observation::
+Note we've given it a directory, not a filename... in such cases the
+code will read ``obsfiledb.sqlite`` in the stated directory.
+
+Now we get the list of all observations, and choose one::
 
   all_obs = db.get_obs()
   print(all_obs[0])   # -> 'CES-Atacama-LAT-Tier1DEC-035..-045_RA+040..+050-0-0_LF'
@@ -75,8 +146,7 @@ file info (paths and sample indices) for one of the detsets::
   
   files = db.get_files(all_obs[0], detsets=[all_detsets[0]])
   print(files['LF1_tube_LT6'])
-                      # -> ('MY_TOD_FILES/datadump_LAT_LF1/CES-Atacama-LAT-Tier1DEC-035..-045_RA+040..+050-0-0/LF1_tube_LT6_00000000.g3', 0, None)
-
+                      # -> [('/mnt/so1/shared/todsims/pipe-s0001/v2/datadump_LAT_LF1/CES-Atacama-LAT-Tier1DEC-035..-045_RA+040..+050-0-0/LF1_tube_LT6_00000000.g3', 0, None)]
 
 
 Class Documentation

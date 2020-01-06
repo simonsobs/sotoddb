@@ -23,7 +23,7 @@ class TestObsFileDB(unittest.TestCase):
 
     def get_simple_db(self, n_obs=2, n_detsets=2, n_dets=3, n_segs=3):
         # Create database in RAM
-        db = ObsFileDB.new()
+        db = ObsFileDB()
         obs_ids = ['obs%i' % i for i in range(n_obs)]
         detsets = ['group%i' % i for i in range(n_detsets)]
         for di, d in enumerate(detsets):
@@ -91,6 +91,19 @@ class TestObsFileDB(unittest.TestCase):
         self.assertEqual(db2.get_obs(), db.get_obs())
         self.assertEqual(len(db2.verify()['raw']),
                          len(db.verify()['raw']) - n_segs)
+
+    def test_030_prefix(self):
+        db = self.get_simple_db()
+        # Create all the missing files.
+        for row in db.verify()['raw']:
+            present, filename = row[:2]
+            open(filename, 'w').close()
+        # Quick check we've done that properly...
+        results = db.verify()
+        assert(all([r[0] for r in results['raw']]))
+
+        # Now re-instantiate the DB a few different ways to confirm
+        # that it sets prefix properly.
 
 
 if __name__ == '__main__':
