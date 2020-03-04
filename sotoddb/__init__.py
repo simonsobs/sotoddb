@@ -4,6 +4,8 @@ from .detdb import ResultSet
 from .obsfiledb import ObsFileDB
 from .proddb import ManifestDB, ManifestScheme
 
+from . import simple
+
 def get_example(db_type, *args, **kwargs):
     if db_type == 'DetDB':
         return detdb.get_example(*args, **kwargs)
