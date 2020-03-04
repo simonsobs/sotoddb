@@ -42,6 +42,7 @@ The ManifestScheme includes:
 
 import sqlite3
 import os
+import numpy as np
 
 TABLE_DEFS = {
     'input_scheme': [
@@ -89,6 +90,7 @@ class ManifestScheme:
         filename.
         """
         self.cols.append((name, 'out', 'exact', dtype))
+        return self
 
     def _get_scheme_rows(self):
         """
@@ -156,10 +158,10 @@ class ManifestScheme:
                 if not name in params:
                     raise ValueError('Parameter %s is not optional.' % name)
                 if match == 'exact':
-                    qs.append('%s=?' % name)
+                    qs.append('`%s`=?' % name)
                     vals.append(params[name])
                 elif match == 'range':
-                    qs.append('(%s__lo <= ?) and (? < %s__hi)' % (name, name))
+                    qs.append('(`%s__lo` <= ?) and (? < `%s__hi`)' % (name, name))
                     vals.extend([params[name], params[name]])
                 else:
                     raise ValueError("Bad ctype '%s'" % match)
@@ -171,18 +173,22 @@ class ManifestScheme:
     def get_insertion_query(self, params):
         qs = []
         vals = []
+        unassigned = list(params.keys())
         for col in self.cols:
             (name, purpose, match, dtype) = col
             if not name in params:
                 raise ValueError('Parameter %s is not optional.' % name)
+            unassigned.remove(name)
             if match == 'exact':
-                qs.append(name)
+                qs.append('`%s`' % name)
                 vals.append(params[name])
             elif match == 'range':
-                qs.append('%s__lo,%s__hi' % (name,name))
+                qs.append('`%s__lo`,`%s__hi`' % (name,name))
                 vals.extend(params[name])
             else:
                 raise ValueError("Bad ctype '%s'" % match)
+        if len(unassigned):
+            raise ValueError('Attempting to add data for unknown fields: %s' % unassigned)
         return ','.join(qs), tuple(vals)
 
     
@@ -196,23 +202,22 @@ class ManifestDB:
         db0 = cls(map_file=filename)
         return db0
 
-    def __init__(self, map_file=None, scheme=None):
+    def __init__(self, map_file=None, scheme=None, init_db=True):
         """
         Instantiate a database.  If map_file is provided, the
         database will be connected to the indicated sqlite file on
         disk, and any changes made to this object be written back to
         the file.
         """
-        if map_file == None:
+        if map_file is None:
             map_file = ':memory:'
-        if os.path.exists(map_file):
-            raise RuntimeError(
-                "The database already exists (use from_file?): %s" % map_file)
         self.conn = sqlite3.connect(map_file)
         self.conn.row_factory = sqlite3.Row  # access columns by name
 
         if scheme is not None:
             self._create(scheme)
+        elif init_db:
+            self.scheme = ManifestScheme.from_database(self.conn)
 
     def _create(self, manifest_scheme):
         """
@@ -238,6 +243,26 @@ class ManifestDB:
 
         self.scheme = ManifestScheme.from_database(self.conn)
 
+    def copy(self, map_file=None, overwrite=False):
+        """
+        Duplicate the current database into a new database object, and
+        return it.  If map_file is specified, the new database will be
+        connected to that sqlite file on disk.  Note that a quick way
+        of writing a DB to disk to call copy(map_file=...) and then
+        simply discard the returned object.
+        """
+        if map_file is not None and os.path.exists(map_file):
+            if overwrite:
+                os.remove(map_file)
+            else:
+                raise RuntimeError("Output file %s exists (overwrite=True "
+                                   "to overwrite)." % map_file)
+        new_db = ManifestDB(map_file=map_file, init_db=False)
+        script = ' '.join(self.conn.iterdump())
+        new_db.conn.executescript(script)
+        new_db.scheme = ManifestScheme.from_database(new_db.conn)
+        return new_db
+
     def _get_file_id(self, filename, create=False):
         """
         Lookup a file_id in the file table, or create it if `create` and not found.
@@ -253,7 +278,7 @@ class ManifestDB:
             return None
         return row_id[0]
     
-    def match(self, params):
+    def match(self, params, multi=False):
         """
         Given Index Data, return Endpoint Data.
 
@@ -266,15 +291,18 @@ class ManifestDB:
           A dict of Endpoint Data, or None if no match was found.
         """
         q, p, rp = self.scheme.get_match_query(params)
+        cols = ['files`.`name'] + list(rp)
         c = self.conn.cursor()
-        c.execute('select files.name,%s from ' % (','.join(rp)) + 
-                  'map join files on map.file_id=files.id where %s' % q, p)
+        c.execute('select `%s` ' % ('`,`'.join(cols)) + 
+                  'from map join files on map.file_id=files.id where %s' % q, p)
         rows = c.fetchall()
         if len(rows) == 0:
             return None
+        rp.insert(0, 'filename')
+        if multi:
+            return [dict(zip(rp, r)) for r in rows]
         if len(rows) > 1:
             raise WTF()
-        rp.insert(0, 'filename')
         return dict(zip(rp, rows[0]))
 
     def add_entry(self, params, filename=None, create=True, commit=True):
@@ -316,3 +344,64 @@ class ManifestDB:
         Raises SchemaError in the first case, IntervalError in the second.
         """
         return False
+
+    # Meta-data driving.
+
+    def restrict_results_dets(self, d, m, detdb):
+        # Each d must be modified so it applies to m x d.  This is
+        # done differently depending on whether either m or d
+        # specifies results by det:name, since that should lead to
+        # the output result being of that form as well.
+        m_sub = {k[len('dets:'):]: v for k, v in m.items() if k.startswith('dets:')}
+        if 'dets:name' in m:
+            if 'dets:name' in d.keys:
+                # This is easy.
+                mask = d['dets:name'] == m['dets:name']
+                return d.subset(rows=np.array(mask))
+            else:
+                # This is still not too bad.
+                keys = [k for k in d.keys if k.startswith('dets:')]
+                okeys = [k for k in d.keys if not k in keys]
+                dsub = d.subset(keys=keys)
+                props = detdb.props([m['dets:name']], props=keys)
+                for row in dsub:
+                    if {k: row[k] for k in keys} == props:
+                        return d.__class__(['dets:name'] + okeys,
+                                           [m['dets:name']] + [row[k] for k in okeys])
+        else:
+            if 'dets:name' in d.keys:
+                # ONLY THIS BLOCK IS TESTED
+                dets = detdb.dets(props=m_sub)
+                mask = [r['dets:name'] in dets['name'] for r in d]
+                return d.subset(rows=np.array(mask))
+            else:
+                common_keys = list(set(m.keys()).intersect(d.keys))
+                mask = np.ones(len(d), bool)
+                for k in common_keys:
+                    mask *= (m[k] == d[k])
+                    print(k, mask.sum())
+                return d.subset(rows=mask)
+
+    def populate(self, cls, request, detdb=None, obsdb=None):
+        # Step one, internally get the match.
+        matches = self.match(request, multi=True)
+        # Load all from the metadata class (must support simple metadata interface).
+        reqs = [request.copy() for m in matches]
+        for r, m in zip(reqs, matches):
+            r.update(m)
+        datas = cls.batch_from_loadspec(reqs)
+
+        # Now for each returned object, project out only the intrinsic
+        # data subset deemed valid by the proddb.
+        if 'dets' in cls.intrinsic_axes:
+            reduced1 = []
+            for m, d in zip(matches, datas):
+                reduced1.append(self.restrict_results_dets(d, m, detdb))
+            # And against request...
+            datas = [self.restrict_results_dets(d, request, detdb) for d in reduced1]
+
+        if 'obs_id' in cls.intrinsic_axes:
+            pass # don't worry it won't be.
+
+        # Combined output.
+        return sum(datas[1:], datas[0])

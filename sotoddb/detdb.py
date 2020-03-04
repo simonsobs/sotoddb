@@ -261,11 +261,12 @@ class DetDB(object):
         new_db.conn.executescript(data)
         return new_db
 
-    def reduce(self, det_list=None, time0=None, time1=None):
+    def reduce(self, dets=None, time0=None, time1=None,
+               inplace=False):
         """Discard information from the database unless it is "relevant".
 
         Args:
-          det_list (list or ResultSet): A list of detectors names that
+          dets (list or ResultSet): A list of detectors names that
             are relevant.  If this is a ResultSet, the 'name' column
             is used.  If None, all dets are relevant.
           time0 (int): If time1 is None, then a property's time range
@@ -274,10 +275,15 @@ class DetDB(object):
           time1 (int): Along with time0, forms a time range that have
             non-zero intersection with the property's time range for
             the entry to be considered relevant.
+          inplace (bool): Whether to act on the present object, or to
+            return a modified copy.
 
-        Returns self.  Note the reduction is done in place, however.
+        Returns the reduced data (which is self, if inplace is True).
 
         """
+        if not inplace:
+            return self.copy().reduce(dets, time0, time1, inplace=True)
+
         time_clause = '0'
         if time0 is not None:
             if time1 is None:
@@ -289,13 +295,13 @@ class DetDB(object):
             assert(time1 is None)
 
         c = self.conn.cursor()
-        if det_list is not None:
+        if dets is not None:
             # Convert to a list of names.
-            if isinstance(det_list, ResultSet):
-                det_list = det_list['name']
+            if isinstance(dets, ResultSet):
+                dets = dets['name']
             # Create a temporary table to list dets we're keeping.
             self.create_table('_keepers', ["`name` varchar"], raw=True)
-            for d in det_list:
+            for d in dets:
                 c.execute('insert into _keepers (name) values (?)', (d,))
             # Intersect dets against _keepers, discard _keepers.
             c.execute('delete from dets where not dets.name in '
@@ -338,7 +344,7 @@ class DetDB(object):
             self.conn.commit()
         return db_id
 
-    def add_props(self, table, name, time_range=None, commit=False, **kw):
+    def add_props(self, table, name, time_range=None, commit=True, **kw):
         """Add property information for a detector.
 
         Args:
@@ -435,7 +441,8 @@ class DetDB(object):
         return ResultSet.from_cursor(c)
 
     # Reverse lookup.
-    def props(self, dets=None, timestamp=None, props=None):
+    def props(self, dets=None, timestamp=None, props=None,
+              concise=False):
         """
         Get the value of the properties listed in props, for each detector
         identified in dets (a list of strings, or a ResultSet with a
@@ -491,6 +498,7 @@ class DetDB(object):
         c.execute(q)
         results = ResultSet.from_cursor(c, keys=keys)
         c.execute('drop table if exists _dets')
+        results.strip(['base.'])
         return results
 
 
@@ -558,7 +566,45 @@ class ResultSet(object):
             self.rows = [x for x in src]
 
     @classmethod
+    def from_friend(cls, source):
+        return cls(source.keys, source.rows)
+
+    def copy(self):
+        return self.__class__(self.keys, self.rows)
+
+    def subset(self, keys=None, rows=None):
+        """Returns a copy of the object, selecting only the keys and rows
+        specified.
+
+        Arguments:
+          keys: a list of keys to keep.  None keeps all.
+
+          rows: a list or array of the integers representing which
+            rows to keep.  This can also be specified as an array of
+            bools, of the same length as self.rows, to select row by
+            row.  None keeps all.
+
+        """
+        if keys is None:
+            keys = self.keys
+            def key_sel_func(row):
+                return row
+        else:
+            key_idx = [self.keys.index(k) for k in keys]
+            def key_sel_func(row):
+                return [row[i] for i in key_idx]
+        if rows is None:
+            new_rows = map(key_sel_func, self.rows)
+        elif isinstance(rows, np.ndarray) and rows.dtype == bool:
+            assert(len(rows) == len(self.rows))
+            new_rows = [key_sel_func(r) for r, s in zip(self.rows, rows) if s]
+        else:
+            new_rows = [key_sel_func(self.rows[i]) for i in rows]
+        return self.__class__(keys, new_rows)
+
+    @classmethod
     def from_cursor(cls, cursor, keys=None):
+
         """Create a ResultSet using the results stored in cursor, an
         sqlite.Cursor object.  The cursor must have be configured so
         that .description is populated.
@@ -594,7 +640,52 @@ class ResultSet(object):
         duplicates removed.  The rows are sorted (according to python
         sort).
         """
-        return ResultSet(self.keys, sorted(list(set(self.rows))))
+        return self.__class__(self.keys, sorted(list(set(self.rows))))
+
+    def strip(self, patterns=[]):
+        """For any keys that start with a string in patterns, remove that
+        string prefix from the key.  Operates in place.
+
+        """
+        for i, k in enumerate(self.keys):
+            for p in patterns:
+                if k.startswith(p):
+                    self.keys[i] = k[len(p):]
+                    break
+        assert(len(self.keys) == len(set(self.keys)))
+
+    # Todo: decide whether axisman conversion code lives here or axisman...
+    def axismanager(self, detdb=None):
+        from sotodlib import core
+        return core.AxisManager.from_resultset(self, detdb=detdb)
+
+    # Todo: move this to the right place, too.
+    def restrict_dets(self, restriction, detdb=None):
+        # There are 4 classes of keys:
+        # - dets:* keys appearing only in restriction
+        # - dets:* keys appearing only in self
+        # - dets:* keys appearing in both
+        # - other.
+        new_keys = [k for k in restriction if k.startswith('dets:')]
+        match_keys = []
+        for k in self.keys:
+            if k in new_keys:
+                match_keys.append(k)
+                new_keys.remove(k)
+        other_keys = [k for k in self.keys if k not in match_keys]
+        output_keys = new_keys + match_keys + other_keys # disjoint.
+        output_rows = []
+        for row in self:
+            row = dict(row)  # copy
+            for k in match_keys:
+                if row[k] != restriction[k]:
+                    break
+            else:
+                # You passed.
+                row.update({k: restriction[k] for k in new_keys})
+            output_rows.append([row[k] for k in output_keys])
+        # That's all.
+        return self.__class__(output_keys, output_rows)
 
     # Everything else is just implementing container-like behavior
 
@@ -634,7 +725,7 @@ class ResultSet(object):
             index = self.keys.index(item)
             return np.array([x[index] for x in self.rows])
         # Slicing.
-        output = ResultSet(self.keys, self.rows[item])
+        output = self.__class__(self.keys, self.rows[item])
         return output
 
     def __iadd__(self, other):
@@ -642,8 +733,16 @@ class ResultSet(object):
         return self
 
     def __add__(self, other):
-        output = ResultSet(self.keys, self)
+        output = self.copy()
         output += other
+        return output
+
+    @staticmethod
+    def concatenate(items, axis=0):
+        assert(axis == 0)
+        output = items[0].copy()
+        for item in items[1:]:
+            output += item
         return output
 
 
