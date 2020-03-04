@@ -5,6 +5,7 @@ from .obsfiledb import ObsFileDB
 from .proddb import ManifestDB, ManifestScheme
 
 from . import simple
+from .loader import SuperLoader
 
 def get_example(db_type, *args, **kwargs):
     if db_type == 'DetDB':
