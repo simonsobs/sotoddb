@@ -99,11 +99,14 @@ class PerDetectorHdf5(ResultSet, _Hdf5Writer):
         columns = []
         for i, k in enumerate(data_in.dtype.names):
             if data_in.dtype[k].char == 'S':
-                 # Convert to unicode.
+                # Convert to unicode.
                 columns.append(np.array([v.decode('ascii') for v in data_in[k]]))
             else:
                 columns.append(data_in[k])
-            new_dtype.append((key_map.get(k, k), columns[-1].dtype))
+            if len(data_in[k].shape) == 1:
+                new_dtype.append((key_map.get(k, k), columns[-1].dtype))
+            else:
+                new_dtype.append((key_map.get(k, k), columns[-1].dtype, data_in[k].shape[1:]))
         new_dtype = np.dtype(new_dtype)
         output = np.empty(data_in.shape, dtype=new_dtype)
         for k, c in zip(new_dtype.names, columns):
@@ -164,7 +167,7 @@ class PerDetectorHdf5(ResultSet, _Hdf5Writer):
                 for idx in indices:
                     dataset = load_params[idx]['dataset']
                     if dataset is not last_dataset:
-                        data = fin[dataset].value
+                        data = fin[dataset][()]
                         data = cls._prefilter_data(data)
                         last_dataset = dataset
 

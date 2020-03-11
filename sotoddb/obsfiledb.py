@@ -120,7 +120,7 @@ class ObsFileDB:
     def for_dir(cls, path, filename='obsfiledb.sqlite', readonly=True):
         """Deprecated; use from_file()."""
         print('Use of ObsFileDb.for_dir() is deprecated... use from_file.')
-        return self.from_file(os.path.join(path, filename), prefix=path)
+        return cls.from_file(os.path.join(path, filename), prefix=path)
 
     def copy(self, map_file=None, overwrite=False):
         """

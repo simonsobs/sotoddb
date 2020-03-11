@@ -293,8 +293,11 @@ class ManifestDB:
         q, p, rp = self.scheme.get_match_query(params)
         cols = ['files`.`name'] + list(rp)
         c = self.conn.cursor()
+        where_str = ''
+        if len(q):
+            where_str = 'where %s' % q
         c.execute('select `%s` ' % ('`,`'.join(cols)) + 
-                  'from map join files on map.file_id=files.id where %s' % q, p)
+                  'from map join files on map.file_id=files.id %s' % where_str, p)
         rows = c.fetchall()
         if len(rows) == 0:
             return None
