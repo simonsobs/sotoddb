@@ -1,11 +1,10 @@
-from . import detdb
 from .detdb import DetDB
-from .detdb import ResultSet
+from .loader import SuperLoader
 from .obsfiledb import ObsFileDB
 from .proddb import ManifestDB, ManifestScheme
+from .resultset import ResultSet
 
 from . import simple
-from .loader import SuperLoader
 
 def get_example(db_type, *args, **kwargs):
     if db_type == 'DetDB':
