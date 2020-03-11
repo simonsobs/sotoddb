@@ -6,7 +6,12 @@ REGISTRY = {
 }
 
 class SuperLoader:
-    def __init__(self, detdb, obsdb):
+    def __init__(self, context=None, detdb=None, obsdb=None):
+        if context is not None:
+            if detdb is None:
+                detdb = context.detdb
+            if obsdb is None:
+                obsdb = context.obsdb
         self.detdb = detdb
         self.obsdb = obsdb
 
@@ -26,8 +31,9 @@ class SuperLoader:
             # Load the database, match the request,
             man = metadata.ManifestDB.from_file(dbfile)
             # Provide any extrinsic boosting.
-            if not 'obs:timestamp' in request:
-                request['obs:timestamp'] = float(request['obs:obs_id'][:10])
+            if not 'obs:timestamp' in request and self.obsdb is not None:
+                request['obs:timestamp'] = self.obsdb.something()
+                #float(request['obs:obs_id'][:10])
             index_lines = man.match(request, multi=True)
 
             # Load and reduce each Index line
@@ -105,6 +111,7 @@ class SuperLoader:
             item = self.load_raw([spec], request)
             dest = self.unpack(item, dest=dest)
         return dest
+
 
 class Unpacker:
     @classmethod
