@@ -344,12 +344,12 @@ class DetDB(object):
             self.conn.commit()
         return db_id
 
-    def add_props(self, table, name, time_range=None, commit=True, **kw):
+    def add_props(self, table_, name_, time_range=None, commit=True, **kw):
         """Add property information for a detector.
 
         Args:
-          table (str): The property table name.
-          name (str): The detector name.
+          table_ (str): The property table name.
+          name_ (str): The detector name.
           time_range (pair of ints): The time range over which the
             property value is applicable.
           commit (bool): Whether or not to commit the db.
@@ -360,12 +360,12 @@ class DetDB(object):
         """
         if time_range is None:
             time_range = self.ALWAYS
-        row_id = self.get_id(name, create=True, commit=False)
+        row_id = self.get_id(name_, create=True, commit=False)
         keys, values = zip(*kw.items())
         key_string = ('det_id,time0,time1' +
                       (''.join([',`{}`'] * len(keys)).format(*keys)))
         val_string = '?,?,?' + ''.join([',?'] * len(keys))
-        q = (f'insert into {table} ({key_string}) '
+        q = (f'insert into {table_} ({key_string}) '
              f'values ({val_string})')
         self.conn.execute(
             q, (row_id, time_range[0], time_range[1]) + tuple(values))
@@ -501,6 +501,40 @@ class DetDB(object):
         results.strip(['base.'])
         return results
 
+    def intersect(self, *specs, resolve=False):
+        """Intersect the provided detector specs.  Each entry is either a list
+        (or similar iterable) of detector names, or a dictionary
+        specifying detector properties.
+
+        If resolve=True, then the returned item is a list (rather
+        than, possibly, a dict).
+
+        """
+        if len(specs) == 0:
+            return []
+        dicts = [s for s in specs if isinstance(s, dict)]
+        others = [s for s in specs if not s in dicts]
+        # Reduce the dicts.
+        req = {}
+        for d in dicts:
+            for k, v in d.items():
+                if k in req:
+                    if req[k] != v:
+                        return []
+                else:
+                    req[k] = v
+        if len(others) == 0:
+            if resolve:
+                return self.dets(props=req)['name']
+            return req
+
+        # Turn it into a list.
+        req = self.dets(props=req)['name']
+        keepers = set(req)
+        for other in others:
+            keepers.intersection_update(other)
+        return [n for n in req if n in keepers]
+
 
 class ResultSet(object):
     """ResultSet is a special container for holding the results of
@@ -563,11 +597,15 @@ class ResultSet(object):
         if src is None:
             self.rows = []
         else:
-            self.rows = [x for x in src]
+            self.rows = [tuple(x) for x in src]
 
     @classmethod
     def from_friend(cls, source):
-        return cls(source.keys, source.rows)
+        if isinstance(source, np.ndarray):
+            keys = source.dtype.names # structured array?
+            return cls(keys, list(source))
+        if isinstance(source, ResultSet):
+            return cls(source.keys, source.rows)
 
     def copy(self):
         return self.__class__(self.keys, self.rows)
@@ -628,7 +666,7 @@ class ResultSet(object):
             keys = [k.split('.')[-1] for k in keys]
             assert(len(set(keys)) == len(keys))  # distinct.
         columns = tuple(map(np.array, zip(*self.rows)))
-        dtype = [(k, c.dtype) for k, c in zip(keys, columns)]
+        dtype = [(k, c.dtype, c.shape[1:]) for k, c in zip(keys, columns)]
         output = np.ndarray(shape=len(columns[0]), dtype=dtype)
         for k, c in zip(keys, columns):
             output[k] = c
@@ -744,6 +782,20 @@ class ResultSet(object):
         for item in items[1:]:
             output += item
         return output
+
+    def merge(self, src):
+        """Merge with src, which must have same number of rows as self.
+        Duplicate columns are not allowed.
+
+        """
+        if len(self) != len(src):
+            raise ValueError("self and src have different numbers of rows.")
+        for k in src.keys:
+            if k in self.keys:
+                raise ValueError("Duplicate key: %s" % k)
+        new_keys = self.keys + src.keys
+        new_rows = [r0 + r1 for r0, r1 in zip(self.rows, src.rows)]
+        self.keys, self.rows = new_keys, new_rows
 
 
 def get_example():
