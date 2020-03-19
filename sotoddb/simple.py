@@ -17,7 +17,7 @@ import numpy as np
 import h5py
 import contextlib
 
-from . import ResultSet
+from .resultset import ResultSet
 
 
 class _Hdf5Writer:
