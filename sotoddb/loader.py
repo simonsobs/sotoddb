@@ -1,6 +1,8 @@
 from sotodlib import core, metadata
 from .simple import PerDetectorHdf5
 
+import os
+
 REGISTRY = {
     'PerDetectorHdf5': PerDetectorHdf5.loader_class(),
 }
@@ -25,6 +27,7 @@ class SuperLoader:
         items = []
         for spec_dict in spec_list:
             dbfile = spec_dict['db']
+            dbfile_path = os.path.split(dbfile)[0]
             names = spec_dict['name']
             loader = spec_dict.get('loader', None)
 
@@ -35,7 +38,9 @@ class SuperLoader:
                 request['obs:timestamp'] = self.obsdb.something()
                 #float(request['obs:obs_id'][:10])
             index_lines = man.match(request, multi=True)
-
+            for line in index_lines:
+                if 'filename' in line:
+                    line['filename'] = os.path.join(dbfile_path, line['filename'])
             # Load and reduce each Index line
             results = []
             for index_line in index_lines:
