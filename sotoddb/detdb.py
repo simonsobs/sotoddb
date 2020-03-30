@@ -1,6 +1,9 @@
 import sqlite3
+import gzip
 import os
-import numpy as np
+
+from .resultset import ResultSet
+
 
 class SchemaError(Exception):
     """
@@ -8,6 +11,7 @@ class SchemaError(Exception):
     such as tables not having the required named columns.
     """
     pass
+
 
 class IntervalError(Exception):
     """
@@ -17,20 +21,17 @@ class IntervalError(Exception):
     """
     pass
 
+
 TABLE_DEFS = {
     'dets': [
         "`id` integer primary key autoincrement",
         "`name` varchar(256) unique",
         ],
-    'template': [
-        "`det_id` integer",
-        "`time0` integer",
-        "`time1` integer",
-    ],
 }
+SPECIAL_COLS = ['det_id', 'time0', 'time1']
 
 
-class DetDB:
+class DetDB(object):
     """
     Detector database.  The database stores data about a set of
     detectors.
@@ -42,40 +43,40 @@ class DetDB:
     tables" that must obey certain rules:
 
     1. They have at least the following columns:
-  
+
        - ``det_id`` integer
        - ``time0`` integer (unix timestamp)
        - ``time1`` integer (unix timestamp)
-    
+
     2. The values time0 and time1 define an interval ``[time0,time1)``
        over which the data in the row is valid.  Every row shall
        respect the constraint that ``time0 <= time1``.
-  
+
     3. No two rows in a property table shall have the same ``det_id``
        and overlapping time intervals.  Note that since the intervals
        are half-open, the intervals [t0, t1) and [t1, t2) do not
        overlap.
     """
 
-    @classmethod
-    def from_file(cls, filename):
-        """
-        Instantiate a DetDB and return it, with the data copied in from
-        the specified sqlite file.  Note that if you want a
-        `persistent` connection to the file, you should instead pass
-        the filename to the DetDB constructor map_file argument.
-        """
-        db0 = cls(map_file=filename)
-        return db0.copy(map_file=None)
-        
+    #: A time-range that is meant to signify "all reasonable times";
+    #: in this case it spans from years 1970 - 2096.
+    ALWAYS = (0., 4e9)
+
+    #: Column definitions (a list of strings) that must appear in all
+    #: Property Tables.
+    TABLE_TEMPLATE = [
+        "`det_id` integer",
+        "`time0` integer",
+        "`time1` integer",
+    ]
+
     def __init__(self, map_file=None, init_db=True):
+        """Instantiate a DetDB.  If map_file is provided, the database will
+        be connected to the indicated sqlite file on disk, and any
+        changes made to this object be written back to the file.
+
         """
-        Instantiate a detector database.  If map_file is provided, the
-        database will be connected to the indicated sqlite file on
-        disk, and any changes made to this object be written back to
-        the file.
-        """
-        if map_file == None:
+        if map_file is None:
             map_file = ':memory:'
         self.conn = sqlite3.connect(map_file)
         self.conn.row_factory = sqlite3.Row  # access columns by name
@@ -86,8 +87,28 @@ class DetDB:
             c.execute("SELECT name FROM sqlite_master "
                       "WHERE type='table' and name not like 'sqlite_%';")
             tables = [r[0] for r in c]
-            if not 'dets' in tables:
-                self.create_table('dets', TABLE_DEFS['dets'])
+            if 'dets' not in tables:
+                self.create_table('dets', TABLE_DEFS['dets'], raw=True)
+
+    def __len__(self):
+        return self.conn.execute('select count(id) from dets').fetchone()[0]
+
+    def _get_property_tables(self):
+        """Return a list of all property tables."""
+        c = self.conn.cursor()
+        c.execute("SELECT name FROM sqlite_master WHERE "
+                  "type='table' and name not like 'sqlite_%' "
+                  "and name != 'dets';")
+        return [str(x[0]) for x in c]
+
+    def _get_property_list(self, table_name):
+        """Return a list of all property columns for the specified property
+        table.
+
+        """
+        c = self.conn.cursor()
+        c.execute(f'PRAGMA table_info({table_name})')
+        return [r[1] for r in c if r[1] not in SPECIAL_COLS]
 
     def validate(self):
         """
@@ -98,63 +119,65 @@ class DetDB:
         the first case, IntervalError in the second.
         """
         c = self.conn.cursor()
-        c.execute("SELECT name FROM sqlite_master WHERE type='table' and name not like 'sqlite_%';")
+        c.execute("SELECT name FROM sqlite_master WHERE type='table' "
+                  "and name not like 'sqlite_%';")
         tables = [r[0] for r in c]
-        if not 'dets' in tables:
+        if 'dets' not in tables:
             raise SchemaError("Database does not contain a `dets` table.")
         tables.remove('dets')
         for t in tables:
             try:
-                c.execute("SELECT det_id,time0,time1 from `%s` order by det_id,time0" % t)
+                c.execute("SELECT det_id,time0,time1 from `%s` "
+                          "order by det_id,time0" % t)
             except sqlite3.OperationalError as e:
                 raise SchemaError("Key columns not found in table `%s`" % t)
             last_id, last_t1 = None, None
             for r in c:
                 _id, _t0, _t1 = r
                 if (_t1 < _t0):
-                    raise IntervalError("Negative size time interval for table %s, "
-                                        "det_id=%i" % (t, _id))
+                    raise IntervalError(
+                        "Negative size time interval for table %s, "
+                        "det_id=%i" % (t, _id))
                 if _id == last_id:
                     if _t0 < last_t1:
-                        raise IntervalError("Overlapping interval for table %s, "
-                                            "det_id=%i" % (t, _id))
-                    last_t1 = t1
+                        raise IntervalError(
+                            "Overlapping interval for table %s, "
+                            "det_id=%i" % (t, _id))
+                    last_t1 = _t1
                 else:
                     last_id, last_t1 = _id, _t1
 
-    def create_table(self, table_name, column_defs):
-        """
-        Add a property table to the database.
+    def create_table(self, table_name, column_defs, raw=False, commit=True):
+        """Add a property table to the database.
 
         Args:
           table_name (str): The name of the new table.
           column_defs (list): A list of sqlite column definition
             strings.
-            
-        And example of column_defs (note it must have the det_id,
-        time0, time1 columns)::
+          raw (bool): See below.
+          commit (bool): Whether to commit the changes to the db.
+
+        The special columns `det`, `time0` and `time1` will be
+        pre-pended unless raw=True.  An example of column_defs is::
 
           column_defs=[
-            "`det_id` integer",
-            "`time0` integer",
-            "`time1` integer",
             "`x_pos` float",
             "`y_pos` float",
           ]
+
         """
         c = self.conn.cursor()
-        q = ('create table if not exists `%s` (' % table_name  +
-                 ','.join(column_defs) + ')')
+        pre_cols = self.TABLE_TEMPLATE
+        if raw:
+            pre_cols = []
+        q = ('create table if not exists `%s` (' % table_name +
+             ','.join(pre_cols + column_defs) + ')')
         c.execute(q)
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return self
-        
 
-    def drop_table(self, name):
-        c = self.conn.cursor()
-        c.execute('drop table %s' % name)
-
-    def copy(self, map_file=None, clobber=False):
+    def copy(self, map_file=None, overwrite=False):
         """
         Duplicate the current database into a new database object, and
         return it.  If map_file is specified, the new database will be
@@ -163,125 +186,263 @@ class DetDB:
         simply discard the returned object.
         """
         if map_file is not None and os.path.exists(map_file):
-            if clobber:
+            if overwrite:
                 os.remove(map_file)
             else:
-                raise RuntimeError("Output file %s exists (clobber=True "
+                raise RuntimeError("Output file %s exists (overwrite=True "
                                    "to overwrite)." % map_file)
         new_db = DetDB(map_file=map_file, init_db=False)
         script = ' '.join(self.conn.iterdump())
         new_db.conn.executescript(script)
         return new_db
 
-    def to_file(self, filename, clobber=True):
-        """
-        Write the present database, as an sqlite3 file, to the indicated
-        filename.  (This does not create a persistent connection to
-        the file.)
-        """
-        self.copy(map_file=filename, clobber=clobber)
+    def to_file(self, filename, overwrite=True, fmt=None):
+        """Write the present database to the indicated filename.
 
-    def reduce(self, det_list=None, time0=None, time1=None):
-        """
-        Discard information from the database unless it is relevant.
-        Data is relevant if:
+        Args:
+          filename (str): the path to the output file.
+          overwrite (bool): whether an existing file should be
+            overwritten.
+          fmt (str): 'sqlite', 'dump', or 'gz'.  Defaults to 'sqlite'
+            unless the filename ends with '.gz', in which it is 'gz'.
 
-        - det_list is None, or det_id is in det_list.
-        - time0 is None, or time1 is None and time0 is within a
-          property's validity range.
-
-        ``time0`` and ``time1`` are both not None, and (``time0``,
-        ``time1``) overlaps with the property's validity range.
         """
-        c = self.conn.cursor()
-        c.execute("SELECT name FROM sqlite_master WHERE type='table' and "
-                  "name not like 'sqlite_%';")
-        tables = [r[0] for r in c]
-        time_clause = '1'
+        if fmt is None:
+            if filename.endswith('.gz'):
+                fmt = 'gz'
+            else:
+                fmt = 'sqlite'
+        if os.path.exists(filename) and not overwrite:
+            raise RuntimeError(f'File {filename} exists; remove or pass '
+                               'overwrite=True.')
+        if fmt == 'sqlite':
+            self.copy(map_file=filename, overwrite=overwrite)
+        elif fmt == 'dump':
+            with open(filename, 'w') as fout:
+                for line in self.conn.iterdump():
+                    fout.write(line)
+        elif fmt == 'gz':
+            with gzip.GzipFile(filename, 'wb') as fout:
+                for line in self.conn.iterdump():
+                    fout.write(line.encode('utf-8'))
+        else:
+            raise RuntimeError(f'Unknown format "{fmt}" requested.')
+
+    @classmethod
+    def from_file(cls, filename, fmt=None):
+        """Instantiate a DetDB and return it, with the data copied in from the
+        specified file.
+
+        Args:
+          filename (str): path to the file.
+          fmt (str): format of the input; see to_file for details.
+
+        Note that if you want a `persistent` connection to the file,
+        you should instead pass the filename to the DetDB constructor
+        map_file argument.
+
+        """
+        if fmt is None:
+            fmt = 'sqlite'
+            if filename.endswith('.gz'):
+                fmt = 'gz'
+        if fmt == 'sqlite':
+            db0 = cls(map_file=filename)
+            return db0.copy(map_file=None)
+        elif fmt == 'dump':
+            with open(filename, 'r') as fin:
+                data = fin.read()
+        elif fmt == 'gz':
+            with gzip.GzipFile(filename, 'r') as fin:
+                data = fin.read().decode('utf-8')
+        else:
+            raise RuntimeError(f'Unknown format "{fmt}" requested.')
+        new_db = DetDB(map_file=None, init_db=False)
+        new_db.conn.executescript(data)
+        return new_db
+
+    def reduce(self, dets=None, time0=None, time1=None,
+               inplace=False):
+        """Discard information from the database unless it is "relevant".
+
+        Args:
+          dets (list or ResultSet): A list of detectors names that
+            are relevant.  If this is a ResultSet, the 'name' column
+            is used.  If None, all dets are relevant.
+          time0 (int): If time1 is None, then a property's time range
+            must contain this time for it to be considered relevant.
+            If time1 is not None, see below.
+          time1 (int): Along with time0, forms a time range that have
+            non-zero intersection with the property's time range for
+            the entry to be considered relevant.
+          inplace (bool): Whether to act on the present object, or to
+            return a modified copy.
+
+        Returns the reduced data (which is self, if inplace is True).
+
+        """
+        if not inplace:
+            return self.copy().reduce(dets, time0, time1, inplace=True)
+
+        time_clause = '0'
         if time0 is not None:
             if time1 is None:
-                time_clause = '(%i < time0) or (time1 <= %i)' % (time0, time0)
+                time_clause = '(%i >= time0) or (time1 > %i)' % (time0, time0)
             else:
                 assert(time1 >= time0)
-                time_clause = '(%i > time1) or (time0 >= %i)' % (time0, time1)
+                time_clause = '(%i <= time1) or (time0 < %i)' % (time0, time1)
         else:
             assert(time1 is None)
 
-        if det_list is not None:
-            # Create a temporary table to hold the dets we're keeping.
-            # Make sure it has the full index definitions, or the
-            # iterdump -> executescript in .copy() might not work.
-            self.create_table('_dets', TABLE_DEFS['dets'])
-            batch = 2000
-            # The list might be tuples from a get_dets()... convert to just ids.
-            if hasattr(det_list[0], '__getitem__'):
-                det_list = [r[0] for r in det_list]
-            # Copy rows, in batches.
-            while len(det_list):
-                c.execute('insert into _dets select * from dets where id in (%s)' % 
-                          ','.join(['%i' % _x for _x in det_list[:batch]]))
-                det_list=det_list[batch:]
-            # Install this as the new dets table.
-            c.execute('drop table dets')
-            c.execute('alter table _dets rename to dets')
-            det_clause = 'det_id not in (select id from dets)'
+        c = self.conn.cursor()
+        if dets is not None:
+            # Convert to a list of names.
+            if isinstance(dets, ResultSet):
+                dets = dets['name']
+            # Create a temporary table to list dets we're keeping.
+            self.create_table('_keepers', ["`name` varchar"], raw=True)
+            for d in dets:
+                c.execute('insert into _keepers (name) values (?)', (d,))
+            # Intersect dets against _keepers, discard _keepers.
+            c.execute('delete from dets where not dets.name in '
+                      '(select name from _keepers)')
+            c.execute('drop table _keepers')
+            det_clause = 'not det_id in (select id from dets)'
         else:
-            det_clause = '1'
+            det_clause = '0'
 
-        # Cull rows from other tables.
-        for t in tables:
-            if t == 'dets': continue
-            c.execute('delete from %s where %s or %s' % (t, det_clause, time_clause))
-            
+        # Remove orphaned rows from other tables.
+        for t in self._get_property_tables():
+            c.execute('delete from %s where %s or %s' %
+                      (t, det_clause, time_clause))
         self.conn.commit()
-        c.execute('vacuum') # compact the db.
+
+        # Compact the db.
+        c.execute('vacuum')
         self.conn.commit()
 
         return self
 
-    def __len__(self):
-        return self.conn.execute('select count(id) from dets').fetchone()[0]
+    # Construction.
+    def get_id(self, name, commit=True, create=True):
+        """Returns a detector's internal id.  If the detector isn't in the
+        dets table yet, and create==True, then it is added.
 
+        """
+        c = self.conn.execute('select id from dets where name=?',
+                              (name,))
+        db_id = c.fetchone()
+        if db_id is not None:
+            return db_id[0]
+        if not create:
+            raise ValueError("Detector {} not in table and "
+                             "create=False".format(name))
+        c = self.conn.execute('insert into dets (name) values (?)',
+                              (name,))
+        db_id = c.lastrowid
+        if commit:
+            self.conn.commit()
+        return db_id
+
+    def add_props(self, table_, name_, time_range=None, commit=True, **kw):
+        """Add property information for a detector.
+
+        Args:
+          table_ (str): The property table name.
+          name_ (str): The detector name.
+          time_range (pair of ints): The time range over which the
+            property value is applicable.
+          commit (bool): Whether or not to commit the db.
+
+        All other keyword arguments are interpreted as data to write
+        into the property table.
+
+        """
+        if time_range is None:
+            time_range = self.ALWAYS
+        row_id = self.get_id(name_, create=True, commit=False)
+        keys, values = zip(*kw.items())
+        key_string = ('det_id,time0,time1' +
+                      (''.join([',`{}`'] * len(keys)).format(*keys)))
+        val_string = '?,?,?' + ''.join([',?'] * len(keys))
+        q = (f'insert into {table_} ({key_string}) '
+             f'values ({val_string})')
+        self.conn.execute(
+            q, (row_id, time_range[0], time_range[1]) + tuple(values))
+        if commit:
+            self.conn.commit()
 
     # Forward lookup.
-    def get_dets(self, timestamp=None, props={}):
+    def dets(self, timestamp=None, props={}):
         """
         Get a list of detectors matching the conditions listed in the
         "props" dict.  If timestamp is not provided, then time range
         restriction is not applied.
 
-        Returns a list of tuples of the form (det_id, det_name,
-        valid).  The "valid" flag is not currently implemented in any
-        useful way.
+        Returns a list of detector names.
         """
-        q = 'select dets.id as id, dets.name as name, count(id)=1 as valid from dets'
-        r, args = [], []
+        # Accumulate a query, and args.
+        q = 'select dets.name as name from dets'
+        args = []
+
+        # Whatever we were given, convert it to a list of dicts.
+        if isinstance(props, ResultSet):
+            prop_sets = list(props.distinct())
+        elif isinstance(props, dict):
+            prop_sets = [props]
+        else:
+            prop_sets = props
+
+        # Expand each match row into query and args.
         other_tables = []
-        for m, v in props.items():
-            if '.' in m:
-                t,f = m.split('.', 1)
-            else:
-                t, f = 'base', m
-            if not t in other_tables:
-                other_tables.append(t)
-            r.append('%s=?' % m)
-            args.append(v)
+        row_wheres = []
+        for props in prop_sets:
+            r = []
+            for m, v in props.items():
+                if '.' in m:
+                    t, m = m.split('.', 1)
+                else:
+                    t, m = 'base', m
+                if t not in other_tables:
+                    other_tables.append(t)
+                r.append((f'{t}.{m}=?', v))
+            row_wheres.append(r)
+
+        # Joins.
+        for t in other_tables:
+            q += ' join %s on %s.det_id=dets.id' % (t, t)
+        # Accumulate restriction strings...
+        restricts = []
         if timestamp is not None:
-            r.extend(['(%s.time0 <= ? and ? < %s.time1)' % (m,m)
-                      for m in other_tables])
-            [args.extend([timestamp, timestamp]) for m in other_tables]
-        q = q + ' ' + ' '.join(['join %s as %s on %s.det_id=dets.id' % (m,m,m) for m in other_tables])
-        if len(r):
-            q = q + ' where ' + ' and '.join(r)
+            time_clause = '%s.time0 <= ? and ? < %s.time1'
+            for t in other_tables:
+                restricts.append(time_clause % (t, t))
+                args.extend([timestamp, timestamp])
+        # Matching of each prop_set.
+        prop_criteria = []
+        for r in row_wheres:
+            if len(r) == 0:
+                prop_criteria.append('1')
+                continue
+            conds, vals = zip(*r)
+            prop_criteria.append(' and '.join(conds))
+            args.extend(vals)
+
+        if len(prop_criteria) == 0:
+            prop_criteria.append('0')
+        restricts.append(' or '.join(['(' + pc + ')' for pc in prop_criteria]))
+
+        # Apply restrictions...
+        if (restricts):
+            q += ' where ' + ' and '.join(restricts)
         q = q + ' group by id'
         c = self.conn.cursor()
         c.execute(q, tuple(args))
         return ResultSet.from_cursor(c)
-        #return c.fetchall()
-            
 
     # Reverse lookup.
-    def get_props(self, dets, timestamp=None, props=[]):
+    def props(self, dets=None, timestamp=None, props=None,
+              concise=False):
         """
         Get the value of the properties listed in props, for each detector
         identified in dets (a list of strings, or a ResultSet with a
@@ -289,17 +450,35 @@ class DetDB:
         """
         # Create temporary table
         c = self.conn.cursor()
-        #c.execute('begin transaction')
+        c.execute('begin transaction')
         c.execute('drop table if exists _dets')
         c.execute('create temp table _dets (`name` varchar(32))')
         q = 'insert into _dets (name) values (?)'
+        if dets is None:
+            dets = self.dets()['name']
         if isinstance(dets, ResultSet):
-            dets = dets.asarray()['name']
+            dets = dets['name']
+        elif isinstance(dets, dict):
+            # This is intended to handle a single row extracted from a
+            # ResultSet.
+            dets = [dets['name']]
         for a in dets:
             c.execute(q, (a,))
-        #c.execute('end transaction')
+        c.execute('end transaction')
+
+        # Expand props argument.
+        if props is None:
+            props = [t + '.' for t in self._get_property_tables()]
+
+        props, props_ = [], props
+        for p in props_:
+            if p.endswith('.'):
+                table_p = self._get_property_list(p[:-1])
+                props.extend([p + _p for _p in table_p])
+            else:
+                props.append(p)
+
         # Now look stuff up in it.
-        r, args = [], []
         other_tables = []
         fields, keys = [], []
         for i, m in enumerate(props):
@@ -307,72 +486,55 @@ class DetDB:
                 t, f = m.split('.', 1)
             else:
                 t, f = 'base', m
-            if not t in other_tables:
+            if t not in other_tables:
                 other_tables.append(t)
-            fields.append('%s.%s as result%i' % (t, f, i))
-            keys.append(m)
-        q = 'select ' + ','.join(fields) + ' from _dets join dets on _dets.name=dets.name '
-        q = q + ' ' + ' '.join(['join %s as %s on %s.det_id=dets.id' % (m,m,m,)
-                                for m in other_tables])
-        print(q)
+            key = f'{t}.{f}'
+            keys.append(key)
+            fields.append(f'{key} as result{i}')
+        q = ('select ' + ', '.join(fields) +
+             ' from _dets join dets on _dets.name=dets.name ' +
+             ' '.join(['join %s on %s.det_id=dets.id' % (m, m)
+                       for m in other_tables]))
         c.execute(q)
         results = ResultSet.from_cursor(c, keys=keys)
         c.execute('drop table if exists _dets')
+        results.strip(['base.'])
         return results
 
-class ResultSet(list):
-    """
-    ResultSet is a list intended to hold the results of database
-    queries, i.e. tables of numbers.  Each entry in the list
-    corresponds to a row of results.  The names of the columns are
-    stored in self.keys.
+    def intersect(self, *specs, resolve=False):
+        """Intersect the provided detector specs.  Each entry is either a list
+        (or similar iterable) of detector names, or a dictionary
+        specifying detector properties.
 
-    The .from_cursor(cursor) method can be used to construct this
-    object after executing a query on the cursor.  The .asarray()
-    method can be used to return the results in a numpy "structured
-    array", which may be convenient for further grouping and usage of
-    the results.
-    """
-    @classmethod
-    def from_cursor(cls, cursor, keys=None):
-        self = cls()
-        if keys is None:
-            keys = [c[0] for c in cursor.description]
-        self.keys = keys
-        x = cursor.fetchall()
-        self.x = x
-        for _x in x:
-            self.append(tuple(_x))
-        return self
+        If resolve=True, then the returned item is a list (rather
+        than, possibly, a dict).
 
-    def asarray(self, simplify_keys=False):
         """
-        Returns a numpy structured array containing a copy of this
-        ResultSet.  The names of the fields are taken from self.keys.
-        If simplify_keys=True, then the keys are stripped of any
-        prefix; an error is thrown if this yields duplicate key names.
-        """
-        keys = [k for k in self.keys]
-        if simplify_keys: # remove prefixes
-            keys = [k.split('.')[-1] for k in keys]
-            assert(len(set(keys)) == len(keys))  # distinct.
-        columns = tuple(map(np.array, zip(*self)))
-        dtype = [(k,c.dtype) for k,c in zip(keys, columns)]
-        output = np.ndarray(shape=len(columns[0]), dtype=dtype)
-        for k,c in zip(keys, columns):
-            output[k] = c
-        return output
+        if len(specs) == 0:
+            return []
+        dicts = [s for s in specs if isinstance(s, dict)]
+        others = [s for s in specs if not s in dicts]
+        # Reduce the dicts.
+        req = {}
+        for d in dicts:
+            for k, v in d.items():
+                if k in req:
+                    if req[k] != v:
+                        return []
+                else:
+                    req[k] = v
+        if len(others) == 0:
+            if resolve:
+                return self.dets(props=req)['name']
+            return req
 
-    def distinct(self):
-        """
-        Returns a ResultSet that is a copy of the present one, with
-        duplicates removed.  The rows are sorted (according to python
-        sort).
-        """
-        output = ResultSet(set(self))
-        output.sort()
-        return output
-    
+        # Turn it into a list.
+        req = self.dets(props=req)['name']
+        keepers = set(req)
+        for other in others:
+            keepers.intersection_update(other)
+        return [n for n in req if n in keepers]
+
 
 def get_example():
     """
@@ -385,9 +547,6 @@ def get_example():
 
     TABLES = [
         ('base', [
-            "`det_id` integer",
-            "`time0` integer",
-            "`time1` integer",
             "`instrument` varchar(32)",
             "`camera` varchar(32)",
             "`array_code` varchar(16)",
@@ -397,9 +556,6 @@ def get_example():
             "`det_type` varchar(32)",
         ]),
         ('geometry', [
-            "`det_id` integer",
-            "`time0` integer",
-            "`time1` integer",
             "`wafer_x` float",
             "`wafer_y` float",
             "`wafer_pol` float",
@@ -410,57 +566,43 @@ def get_example():
         print('Creating table %s' % n)
         db.create_table(n, d)
 
-    rows = []
+    tel_info = {'instrument': 'simonsobs',
+                'camera': 'latr'}
+
+    det_names = []
     for ar_type, bands, n_ar, n_wa, n_det in [
             ('LF', [27, 39], 1, 3, 37),
             ('MF', [93, 145], 4, 3, 432),
             ('HF', [225, 278], 2, 3, 542)
     ]:
         print('Creating %s-type arrays...' % ar_type)
-        arc = 1 
-        for fi,f in enumerate(bands):
+        for fi, f in enumerate(bands):
             for ar in range(n_ar):
                 for wa in range(n_wa):
-                    iofs = (fi*n_ar*n_wa + n_wa * ar + wa) * n_det
-                    rows.extend([(
-                        '%s%i_%05i' % (ar_type, arc, i),
-                        'f%03i' % f,
-                        ar_type,
-                        '%s%i' % (ar_type, arc),
-                        'W%i' % (wa+1),
-                    )
-                                 for i in range(iofs, iofs + n_det)])
+                    iofs = (fi*n_ar*n_wa + n_wa*ar + wa)*n_det
+                    info = {'freq_code': 'f%03i' % f,
+                            'array_class': ar_type,
+                            'array_code': '%s%i' % (ar_type, ar+1),
+                            'wafer_code': 'W%i' % (wa+1)}
+                    for i in range(iofs, iofs + n_det):
+                        det_names.append('%s%i_%05i' % (ar_type, ar+1, i))
+                        db.add_props('base', det_names[-1],
+                                     det_type='bolo',
+                                     **tel_info, **info, commit=False)
 
-    print('Adding %i detectors...' % len(rows))
-    t0, t1 = 0, 2e9
-    q0 = 'insert into dets (name) values (?)'
-    q1 = ('insert into base ' 
-          '(time0, time1, det_id, freq_code, array_class, array_code, wafer_code) '
-          'values (?,?,?,?,?,?,?)')
-    c = db.conn.cursor()
-
-    det_ids = []
-    for r in rows:
-        c.execute(q0, (r[0],))
-        det_ids.append(c.lastrowid)
-        args = (t0, t1, det_ids[-1]) + r[1:]
-        c.execute(q1, args)
-
-    c.execute('update base set instrument="simonsobs",camera="latr",'\
-              'det_type="bolo" where 1')
+    print('Committing {} detectors...'.format(len(det_names)))
+    db.conn.commit()
 
     # Organize these dets in a big square.  This is not the plan.
-    n_row = int(len(rows)**.5)
+    n_row = int(len(det_names)**.5 + 1)
     for i in range(n_row):
         for j in range(n_row):
             d = i*n_row+j
-            if d >= len(rows):
+            if d >= len(det_names):
                 break
             x, y, ang = i * .02, j * .02, (i+j) % 12. * 15
-            c.execute('insert into geometry '
-                      '(det_id,time0,time1,wafer_x,wafer_y,wafer_pol) '
-                      'values (?,?,?,?,?,?)',
-                      (det_ids[d], 0, 2e9, x, y, ang))
+            db.add_props('geometry', det_names[d], commit=False,
+                         wafer_x=x, wafer_y=y, wafer_pol=ang)
 
     db.conn.commit()
 

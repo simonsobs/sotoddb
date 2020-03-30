@@ -1,6 +1,7 @@
 import sqlite3
 import os
 from collections import OrderedDict
+import numpy as np
 
 TABLE_DEFS = {
     'detsets': [
@@ -10,7 +11,7 @@ TABLE_DEFS = {
     'files': [
         "`name`    varchar(256) unique",
         "`detset`  varchar(16)",
-        "`obs_id`  int",
+        "`obs_id`  varchar(256)",
         "`sample_start` int",
         "`sample_stop`  int",
     ],
@@ -42,7 +43,8 @@ class ObsFileDB:
 
     Note that many functions have a "commit" option, which simply
     affects whether the .commit is called on the database or not (it
-    can be faster to suppress such commit ops when
+    can be faster to suppress commit ops when a running a batch of
+    updates, and commit manually at the end).
 
     """
 
@@ -53,60 +55,74 @@ class ObsFileDB:
     #: from this database.
     prefix = ''
 
-    def __init__(self, map_file, readonly=False):
-        """Instantiate a database.  Users should normally get a database
-        through one of the classmethods, "new" or "from_file".
+    def __init__(self, map_file=None, prefix=None, init_db=True, readonly=False):
+        """Instantiate an ObsFileDB.
+
+        Arguments:
+          map_file (string): sqlite database file to map.  Defaults to
+            ':memory:'.
+          prefix (string): as described in class documentation.
+          init_db (bool): If True, attempt to create the database
+            tables.
+          readonly (bool): If True, the database file will be mapped
+            in read-only mode.  Not valid on dbs held in :memory:.
 
         """
+        if map_file is None:
+            map_file = ':memory:'
+
+        self.prefix = self._get_prefix(map_file, prefix)
+
+        uri = False
         if readonly:
+            if map_file == ':memory:':
+                raise ValueError('Cannot honor request for readonly db '
+                                 'mapped to :memory:.')
             map_file, uri = 'file:%s?mode=ro' % map_file, True
-        else:
-            uri = False
+
         self.conn = sqlite3.connect(map_file, uri=uri)
         self.conn.row_factory = sqlite3.Row  # access columns by name
 
-    @classmethod
-    def from_file(cls, filename, must_exist=False, readonly=False):
-        """
-        Returns an ObsFileDB mapped onto the specified sqlite file.
-        """
-        do_create = False
-        if not os.path.exists(filename):
-            if must_exist:
-                raise RuntimeError('Insisted that ObsFileDB at {} must exist, '
-                                   'but it does not.'.format(filename))
-            do_create = True
-        self = cls(filename, readonly)
-        if do_create:
+        if init_db and not readonly:
             self._create()
-        return self
+
+    @staticmethod
+    def _get_prefix(map_file, prefix):
+        """Common logic for setting the file prefix based on map_file and
+        prefix arguments.
+
+        """
+        if prefix is not None:
+            return prefix
+        if map_file == ':memory:':
+            return ''
+        return os.path.split(os.path.abspath(map_file))[0] + '/'
+
+    @classmethod
+    def from_file(cls, map_file, prefix=None):
+        """Returns an ObsFileDB that is initialized from map_file.  This is a
+        copy of the database; changes will not be written back to the
+        file.
+
+        Arguments:
+          map_file (str): Name of the file on disk.  If instead the
+            string is the name of an existing directory, the code will
+            try to find obsfildb.sqlite in that directory.
+          prefix (str): Prefix for the database (see object docs).
+
+        """
+        if os.path.isdir(map_file):
+            map_file = os.path.join(map_file, 'obsfiledb.sqlite')
+        source_db = cls(map_file, prefix=prefix, readonly=True)
+        return source_db.copy()
 
     @classmethod
     def for_dir(cls, path, filename='obsfiledb.sqlite', readonly=True):
-        """Returns an ObsFileDB located at the specified directory.  The DB is
-        assumed to describe the data files based in that directory.
+        """Deprecated; use from_file()."""
+        print('Use of ObsFileDb.for_dir() is deprecated... use from_file.')
+        return cls.from_file(os.path.join(path, filename), prefix=path)
 
-        """
-        db_file = os.path.join(path, filename)
-        self = cls(db_file, readonly)
-        self.prefix = path
-        return self
-
-    @classmethod
-    def new(cls, filename=':memory:'):
-        """Returns a new ObsFileDB.  It will be mapped to RAM unless a
-        database file is specified, in which case that file should not exist.
-
-        """
-        if filename is None:
-            self = cls(':memory:')
-        else:
-            assert(not os.path.exists(filename))
-            self = cls(filename)
-        self._create()
-        return self
-
-    def copy(self, map_file=None, clobber=False):
+    def copy(self, map_file=None, overwrite=False):
         """
         Duplicate the current database into a new database object, and
         return it.  If map_file is specified, the new database will be
@@ -116,13 +132,19 @@ class ObsFileDB:
         if map_file is None:
             map_file = ':memory:'
         script = ' '.join(self.conn.iterdump())
-        new_db = ObsFileDB(map_file)
+        if map_file != ':memory:' and os.path.exists(map_file):
+            if not overwrite:
+                raise RuntimeError("Output database '%s' exists -- remove or "
+                                   "pass overwrite=True to copy." % map_file)
+            os.remove(map_file)
+        new_db = ObsFileDB(map_file, init_db=False)
         new_db.conn.executescript(script)
+        new_db.prefix = self.prefix
         return new_db
 
     def _create(self):
         """
-        Create the database tables.
+        Create the database tables if they do not already exist.
         """
         # Create the tables:
         table_defs = TABLE_DEFS.items()
@@ -187,7 +209,8 @@ class ObsFileDB:
         specified by obs_id.
 
         """
-        c = self.conn.execute('select detset from files where obs_id=?', (obs_id,))
+        c = self.conn.execute('select distinct detset from files '
+                              'where obs_id=?', (obs_id,))
         return [r[0] for r in c]
 
     def get_dets(self, detset):
@@ -208,7 +231,7 @@ class ObsFileDB:
 
         """
         if prefix is None:
-            self.prefix
+            prefix = self.prefix
 
         if detsets is None:
             detsets = self.get_detsets(obs_id)
@@ -220,5 +243,145 @@ class ObsFileDB:
                               (obs_id,) + tuple(detsets))
         output = OrderedDict()
         for r in c:
-            output[r[0]] = (self.prefix + r[1], r[2], r[3])
+            if not r[0] in output:
+                output[r[0]] = []
+            output[r[0]].append((prefix + r[1], r[2], r[3]))
+        return output
+
+    def verify(self):
+        """Check the filesystem for the presence of files described in the
+        database.  Returns a dictionary containing this information in
+        various forms; see code for details.
+
+        This function is used internally by the drop_incomplete()
+        function, and may also be useful for debugging file-finding
+        problems.
+
+        """
+        # Check for the presence of each listed file.
+        c = self.conn.execute('select name, obs_id, detset, sample_start '
+                              'from files')
+        rows = []
+        for r in c:
+            fp = self.prefix + r[0]
+            rows.append((os.path.exists(fp), fp) + tuple(r))
+
+        obs = OrderedDict()
+        for r in rows:
+            present, fullpath, name, obs_id, detset, sample_start = r
+            if obs_id not in obs:
+                obs[obs_id] = {'present': [],
+                               'absent': []}
+            if present:
+                obs[obs_id]['present'].append((detset, sample_start))
+            else:
+                obs[obs_id]['absent'].append((detset, sample_start))
+
+        # Make a detset, sample_start grid for each observation.
+        grids = OrderedDict()
+        for k, v in obs.items():
+            items = v['present']
+            detsets = list(set([a for a, b in items]))
+            sample_starts = list(set([b for a, b in items]))
+            grid = np.zeros((len(detsets), len(sample_starts)), bool)
+            for a, b in items:
+                grid[detsets.index(a), sample_starts.index(b)] = True
+            grids[k] = {'detset': detsets,
+                        'sample_start': sample_starts,
+                        'grid': grid}
+
+        return {'raw': rows,
+                'obs_id': obs,
+                'grids': grids}
+
+    def drop_obs(self, obs_id):
+        """Delete the specified obs_id from the database.  Returns a list of
+        files that are no longer covered by the databse (with prefix).
+
+        """
+        # What files does this affect?
+        c = self.conn.execute('select name from files where obs_id=?',
+                              (obs_id,))
+        affected_files = [self.prefix + r[0] for r in c]
+        # Drop them.
+        self.conn.execute('delete from frame_offsets where file_name in '
+                          '(select name from files where obs_id=?)',
+                          (obs_id,))
+        self.conn.execute('delete from files where obs_id=?',
+                          (obs_id,))
+        self.conn.commit()
+        return affected_files
+
+    def drop_detset(self, detset):
+        """Delete the specified detset from the database.  Returns a list of
+        files that are no longer covered by the database (with
+        prefix).
+
+        """
+        # What files does this affect?
+        c = self.conn.execute('select name from files where detset=?',
+                              (detset,))
+        affected_files = [self.prefix + r[0] for r in c]
+        # Drop them.
+        self.conn.execute('delete from frame_offsets where file_name in '
+                          '(select name from files where detset=?)',
+                          (detset,))
+        self.conn.execute('delete from files where detset=?',
+                          (detset,))
+        self.conn.commit()
+        return affected_files
+
+    def drop_incomplete(self):
+        """Compare the files actually present on the system to the ones listed
+        in this database.  Drop detsets from each observation, as
+        necessary, such that the database is consistent with the file
+        system.
+
+        Returns a list of files that are on the system but are no
+        longer included in the database.
+
+        """
+        affected_files = []
+        scan = self.verify()
+        for obs_id, info in scan['grids'].items():
+            # Drop any detset that does not have complete sample
+            # coverage.
+            detset_to_drop = np.any(~info['grid'], axis=1)
+            for i in detset_to_drop.nonzero()[0]:
+                affected_files.extend(
+                    [r[0] for r in self.conn.execute(
+                        'select name from files where obs_id=? and detset=?',
+                        (obs_id, info['detset'][i]))])
+                self.conn.execute(
+                    'delete from files where obs_id=? and detset=?',
+                    (obs_id, info['detset'][i]))
+        # Drop any detset that no longer appear in any files.
+        self.conn.execute('delete from detsets where name not in '
+                            '(select distinct detset from files)')
+        self.conn.commit()
+        self.conn.execute('vacuum')
+
+        # Return the full paths of only the existing files that have
+        # been dropped from the DB.
+        path_map = {r[2]: r[1] for r in scan['raw'] if r[0]}
+        return [r[1] for r in scan['raw'] if r[2] in affected_files]
+
+    def get_file_list(self, fout=None):
+        """Returns a list of all files in the database, without the file
+        prefix, sorted by observation / detset / sample_start.  This
+        is the sort of list one might use with rsync --files-from.
+
+        If you pass an open file or filename to fout, the names will
+        be written there, too.
+
+        """
+        c = self.conn.execute('select name from files order by '
+                              'obs_id, detset, sample_start')
+        output = [r[0] for r in c]
+        if fout is not None:
+            if isinstance(fout, str):
+                assert(not os.path.exists(fout))
+                fout = open(fout, 'w')
+            for line in output:
+                fout.write(line+'\n')
         return output

@@ -1,44 +1,91 @@
 import unittest
 import sotoddb
 
+import os
+import time
+
+# Global Announcement: I know, but I hate slow tests.
+example = None
+
+
 class TestDetDb(unittest.TestCase):
+    def setUp(self):
+        global example
+        if example is None:
+            print('Creating example database...')
+            example = sotoddb.get_example('DetDB')
+
     def test_smoke(self):
-        """
-        This does not test accuracy... mostly it will just check for
-        syntax / API.
-        """
-        print('Creating the database')
-        db = sotoddb.get_example('DetDB')
-        
+        """Basic functionality."""
+        db = example.copy()
+
         print('Test 1: how many dets have array_code=HF1?')
-        X = db.get_dets(props={'base.array_code': 'HF1'})
+        X = db.dets(props={'base.array_code': 'HF1'})
         print('  Answer: %i' % len(X))
         print('  The first few are:')
         for x in X[:5]:
             print('    ' + str(x))
         print()
-        
+
         print('Test 2: Get (array, wafer) for a bunch of dets.')
-        u2 = db.get_props(X, props=['base.array_code', 'wafer_code'])
-        pairs = [str(x) for x in set(u2)]
+        u2 = db.props(X, props=['base.array_code', 'wafer_code'])
+        pairs = list(u2.distinct())
         print('  Distinct pairs:')
         for p in pairs:
             print('    ' + str(p))
         print()
-        
-        print('Test 3: Make a copy of just the LF1 dets.')
-        db2 = db.copy()
-        X = db2.get_dets(props={'array_code': 'LF1'})
-        db2.reduce(X, time0=-1, time1=1)
-        db3 = db2.copy(map_file='test_LF1.sqlite', clobber=True)
-        print()
-        
-        print('Loading from disk...')
-        db1 = sotoddb.DetDB.from_file('test_out.sqlite')
-        print('Detector count: %i' % len(db1.get_dets()))
-        print()
+        assert(len(pairs) == 3)
+
+    def test_resultset(self):
+        """Test that ResultSet objects have required behaviors.
+
+        """
+        db0 = example.copy()
+        dets = db0.dets()
+        props = db0.props(props=['base.array_code', 'base.wafer_code'])
+        combos = props.distinct()
+
+        assert isinstance(dets, sotoddb.ResultSet)
+        assert isinstance(props, sotoddb.ResultSet)
+        assert isinstance(combos, sotoddb.ResultSet)
+
+        assert isinstance(combos[0], dict)
+        assert isinstance(list(combos)[0], dict)
+
+        # Test distinct coverage.
+        n0 = len(db0.dets(props=combos))
+        n1 = 0
+        for c in combos:
+            subd = db0.dets(props=c)
+            n1 += len(subd)
+        assert(n0 == n1)
+
+        # Check operators...
+        assert isinstance(combos[:2] + combos[2:], sotoddb.ResultSet)
+        with self.assertRaises(TypeError):
+            combos + [1, 2, 3]
+        with self.assertRaises(ValueError):
+            combos + dets
+
+    def test_io(self):
+        """Check to_file and from_file."""
+        db0 = example.copy()
+        dump_list = [('test.sqlite', None),
+                     ('test.txt', 'dump'),
+                     ('test.gz', None)]
+        # Save.
+        for fn, fmt in dump_list:
+            print(f'Writing {fn}')
+            db0.to_file(fn, fmt=fmt)
+            print('  -- output has size {}'.format(os.path.getsize(fn)))
+            t0 = time.time()
+            db1 = sotoddb.DetDB.from_file(fn, fmt=fmt)
+            dt = time.time() - t0
+            print('  -- read-back {} rows in {} seconds.'.format(
+                len(db1.dets()), dt))
+            print('  -- removing.')
+            os.remove(fn)
 
 
 if __name__ == '__main__':
     unittest.main()
-
