@@ -1,5 +1,6 @@
 from .detdb import DetDB
 from .loader import SuperLoader
+from .obsdb import ObsDB
 from .obsfiledb import ObsFileDB
 from .proddb import ManifestDB, ManifestScheme
 from .resultset import ResultSet

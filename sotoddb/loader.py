@@ -34,13 +34,38 @@ class SuperLoader:
             # Load the database, match the request,
             man = metadata.ManifestDB.from_file(dbfile)
             # Provide any extrinsic boosting.
-            if not 'obs:timestamp' in request and self.obsdb is not None:
-                request['obs:timestamp'] = self.obsdb.something()
-                #float(request['obs:obs_id'][:10])
-            index_lines = man.match(request, multi=True)
+            ### This is tricky.  Do you look up _everything_, if you
+            ### have an obsdb abd obs:obs_id is given?  Do you inspect
+            ### the scheme and only provide what is missing?  That is
+            ### possible.
+            missing_keys = man.scheme.get_required_params()
+            for k in request.keys():
+                if k in missing_keys:
+                    missing_keys.remove(k)
+            obs_keys = [k for k in missing_keys if k.startswith('obs:')]
+            if len(obs_keys):
+                assert(self.obsdb is not None)
+                assert('obs:obs_id' in request)
+                request.update(self.obsdb.get(request['obs:obs_id'],
+                                              add_prefix='obs:'))
+            try:
+                index_lines = man.match(request, multi=True)
+            except Exception as e:
+                # Catch any errors and provide a bunch of context to
+                # help user fix their config.
+                text = str(e)
+                raise RuntimeError(
+                    'An exception was raised while decoding the following spec:\n'
+                    + '  ' + str(spec_dict) + '\n'
+                    + 'with the following request:\n'
+                    + '  ' + str(request) + '\n'
+                    + 'The exception is:\n  %s' % text)
+
+            # Make files relative to db location.
             for line in index_lines:
                 if 'filename' in line:
                     line['filename'] = os.path.join(dbfile_path, line['filename'])
+
             # Load and reduce each Index line
             results = []
             for index_line in index_lines:

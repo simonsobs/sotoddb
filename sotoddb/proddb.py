@@ -191,7 +191,13 @@ class ManifestScheme:
             raise ValueError('Attempting to add data for unknown fields: %s' % unassigned)
         return ','.join(qs), tuple(vals)
 
-    
+    def get_required_params(self):
+        """
+        Returns a list of parameter names that are required for matching.
+        """
+        return [c[0] for c in self.cols if c[1] == 'in']
+
+
 class ManifestDB:
     """
     Expose a map from Index Data to Endpoint Data, including a
@@ -277,7 +283,7 @@ class ManifestDB:
                 return row_id
             return None
         return row_id[0]
-    
+
     def match(self, params, multi=False):
         """
         Given Index Data, return Endpoint Data.
@@ -338,7 +344,7 @@ class ManifestDB:
                   p + (file_id,))
         if commit:
             self.conn.commit()
-        
+
     def validate(self):
         """
         Checks that the database is following internal rules.
