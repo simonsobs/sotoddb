@@ -1,4 +1,4 @@
-from sotodlib import core, metadata
+from sotodlib import core
 from .simple import PerDetectorHdf5
 
 import os
@@ -32,7 +32,11 @@ class SuperLoader:
             loader = spec_dict.get('loader', None)
 
             # Load the database, match the request,
-            man = metadata.ManifestDB.from_file(dbfile)
+            try:
+                from sotodlib import metadata
+                man = metadata.ManifestDB.from_file(dbfile)
+            except:
+                man = core.metadata.ManifestDb.from_file(dbfile)
             # Provide any extrinsic boosting.
             ### This is tricky.  Do you look up _everything_, if you
             ### have an obsdb abd obs:obs_id is given?  Do you inspect

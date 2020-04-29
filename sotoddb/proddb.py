@@ -204,7 +204,9 @@ class ManifestDB:
     filename.
     """
     @classmethod
-    def from_file(cls, filename):
+    def from_file(cls, filename, create=False):
+        if not create and not os.path.exists(filename):
+            raise RuntimeError('File %s not found (create?).' % filename)
         db0 = cls(map_file=filename)
         return db0
 

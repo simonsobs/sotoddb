@@ -167,15 +167,19 @@ class ObsDB(object):
         new_db.conn.executescript(data)
         return new_db
 
-    def get(self, obs_id, keys=None, add_prefix=''):
-        assert(keys is None)
-        c = self.conn.execute('select * from obs where obs_id=?', (obs_id,))
-        rows = c.fetchall()
-        if len(rows) == 0:
+    def get(self, obs_id=None, keys=None, add_prefix=''):
+        assert(keys is None)  # Not implemented, sry.
+        if obs_id is None:
+            c = self.conn.execute('select * from obs order by obs_id')
+        else:
+            c = self.conn.execute('select * from obs where obs_id=?', (obs_id,))
+        results = ResultSet.from_cursor(c)
+        if add_prefix is not None:
+            results.keys = [add_prefix + k for k in results.keys]
+        if obs_id is None:
+            return results
+        if len(results) == 0:
             return None
-        if len(rows) > 2:
+        if len(results) > 1:
             raise ValueError('Too many rows...') # or integrity error...
-        result = {}
-        for desc, value in zip(c.description, rows[0]):
-            result[add_prefix + desc[0]] = value
-        return result
+        return results[0]
