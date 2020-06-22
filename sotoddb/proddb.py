@@ -287,8 +287,7 @@ class ManifestDB:
         return row_id[0]
 
     def match(self, params, multi=False):
-        """
-        Given Index Data, return Endpoint Data.
+        """Given Index Data, return Endpoint Data.
 
         Arguments:
 
@@ -296,7 +295,10 @@ class ManifestDB:
 
         Returns:
 
-          A dict of Endpoint Data, or None if no match was found.
+          A dict of Endpoint Data, or None if no match was found.  If
+          multi=True then a list is returned, which could have 0, 1,
+          or more items.
+
         """
         q, p, rp = self.scheme.get_match_query(params)
         cols = ['files`.`name'] + list(rp)
@@ -307,11 +309,11 @@ class ManifestDB:
         c.execute('select `%s` ' % ('`,`'.join(cols)) + 
                   'from map join files on map.file_id=files.id %s' % where_str, p)
         rows = c.fetchall()
-        if len(rows) == 0:
-            return None
         rp.insert(0, 'filename')
         if multi:
             return [dict(zip(rp, r)) for r in rows]
+        if len(rows) == 0:
+            return None
         if len(rows) > 1:
             raise WTF()
         return dict(zip(rp, rows[0]))

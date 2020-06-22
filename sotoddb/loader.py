@@ -93,7 +93,9 @@ class SuperLoader:
                 # restrict to index_line...
                 mi2 = mi1.restrict_dets(index_line, detdb=self.detdb)
                 results.append(mi2)
-            # Combine results.
+
+            # Check that we got results, then combine them in to single ResultSet.
+            assert(len(results) > 0)
             result = results[0].concatenate(results)
 
             # Get list of fields and decode name map.
@@ -142,8 +144,17 @@ class SuperLoader:
 
         """
         for spec in spec_list:
-            item = self.load_raw([spec], request)
-            dest = self.unpack(item, dest=dest)
+            try:
+                item = self.load_raw([spec], request)
+                dest = self.unpack(item, dest=dest)
+            except Exception as e:
+                e.args = e.args + (
+                    "\n\nThe above exception arose while processing "
+                    "the following metadata spec:\n"
+                    f"  spec:    {spec}\n"
+                    f"  request: {request}\n\n"
+                    "Does your database expose this product for this observation?",)
+                raise e
         return dest
 
 

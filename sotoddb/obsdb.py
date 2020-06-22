@@ -167,19 +167,33 @@ class ObsDB(object):
         new_db.conn.executescript(data)
         return new_db
 
-    def get(self, obs_id=None, keys=None, add_prefix=''):
-        assert(keys is None)  # Not implemented, sry.
+    def get(self, obs_id=None, add_prefix=''):
+        """Returns the entry for obs_id, as an ordered dict.  If obs_id is
+        None, returns all entries, as a ResultSet.  Yup, those are the
+        options.
+
+        add_prefix is used to alter the names of fields; this is
+        mostly for constructing metadata selectors ('obs:obs_id' and
+        'obs:timestamp'), with add_prefix='obs:'.
+
+        """
         if obs_id is None:
-            c = self.conn.execute('select * from obs order by obs_id')
-        else:
-            c = self.conn.execute('select * from obs where obs_id=?', (obs_id,))
-        results = ResultSet.from_cursor(c)
-        if add_prefix is not None:
-            results.keys = [add_prefix + k for k in results.keys]
-        if obs_id is None:
-            return results
+            return self.query('1', add_prefix=add_prefix)
+        results = self.query(f'obs_id="{obs_id}"', add_prefix=add_prefix)
         if len(results) == 0:
             return None
         if len(results) > 1:
             raise ValueError('Too many rows...') # or integrity error...
         return results[0]
+
+    def query(self, query_text='1', tags=None, keys=None, add_prefix=''):
+        """Queries the ObsDb using user-provided text.  Returns a ResultSet.
+
+        """
+        assert(keys is None)  # Not implemented, sry.
+        assert(tags is None)  # Not implemented, sry.
+        c = self.conn.execute('select * from obs where %s' % query_text)
+        results = ResultSet.from_cursor(c)
+        if add_prefix is not None:
+            results.keys = [add_prefix + k for k in results.keys]
+        return results

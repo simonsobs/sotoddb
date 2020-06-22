@@ -513,7 +513,7 @@ class DetDB(object):
         if len(specs) == 0:
             return []
         dicts = [s for s in specs if isinstance(s, dict)]
-        others = [s for s in specs if not s in dicts]
+        others = [s for s in specs if not isinstance(s, dict)]
         # Reduce the dicts.
         req = {}
         for d in dicts:
